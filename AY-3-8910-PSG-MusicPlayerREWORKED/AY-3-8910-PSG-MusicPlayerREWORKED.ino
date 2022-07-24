@@ -9,12 +9,15 @@
 //TODO ... [DONE] lose fat.h and use SD.h - changeover was easier than I was expecting
 
 #include <SPI.h>
-#include <SD.h>
+#include <SD.h>  // with this lib, works on LGT8F328P ... needed to stop using fat.h and use SD.h
 #include "SSD1306Ascii.h"
 #include "SSD1306AsciiAvrI2c.h"
 #include "fudgefont.h"  // Based on the Adafruit5x7 font, with '!' to '(' changed to work as a VU BAR (8 chars)
+#include "pins.h"
+#include "AY3891xRegisters.h"
 
 #define VERSION ("1.1")
+
 
 // ********************************************************************
 // Pick one of thse two BUFFER_SIZE options you are compiling for.
@@ -49,110 +52,44 @@ byte playBuf[BUFFER_SIZE];  // PICK ONE OF THE ABOVE BUFFER SIZES
 
 #define RESET_LOADPLAY_BUFFER circularBufferLoadIndex = circularBufferReadIndex = 0;
 
-#define I2C_ADDRESS 0x3C  // 0x3C or 0x3D
-
-// Byte commands - Incoming data from file
+// PSG commands - Incoming byte data from file
 #define  END_OF_INTERRUPT_0xFF            (0xff)
 #define  END_OF_INTERRUPT_MULTIPLE_0xFE   (0xfe)
 #define  END_OF_MUSIC_0xFD                (0xfd)
 
-// Screen Ypos
+// AY modes for BDIR and BC1
+// NOTE: BC2 tied to +5v
+enum AYMode { INACTIVE, WRITE, LATCH_ADDRESS };
+// ----------------------------------
+// BDIR   BC2   BC1   PSG FUNCTION
+// ----+-----+-----+-----------------
+// 0      1      0    INACTIVE
+// 0      1      1    READ FROM PSG (not needed)
+// 1      1      0    WRITE TO PSG
+// 1      1      1    LATCH ADDRESS
+// ----------------------------------
+
+// Arduino Timer 2
+// Aiming for PWM of 50HZ, so interrupt triggers every 20ms
+// 62500MHz / duty 250 = 250 interrupts per second (so will scale by 5 in ISR code)
+const byte dutyCycleTimer2 = 250;   // note: timer 2 has a 8 bit resolution
+
+#define I2C_ADDRESS 0x3C  // 0x3C or 0x3D
+SSD1306AsciiAvrI2c oled;
+// Display Character Rows
 #define DISPLAY_ROW_FILENAME        (0)
 #define DISPLAY_ROW_FILE_COUNTER    (1)
 #define DISPLAY_ROW_BYTES_LEFT      (1)
 #define DISPLAY_ROW_VU_METER_TOP    (2)
 #define DISPLAY_ROW_VU_METER_BOTTOM (3)
+// Maths scale used for internals of VU meter
+#define VU_METER_INTERNAL_SCALE (2)  // speed scale, must use 2^n values
 
-enum AYMode { INACTIVE, WRITE, LATCH_ADDRESS };
-
-#ifndef A0
-#define A0   (14)
-#define A1   (15)
-#define A2   (16)
-#define A3   (17)
-#define A4   (18)
-#define A5   (19)
-#define A6   (20)
-#define A7   (21)
-#endif
-#ifndef D0
-#define D0   (0)
-#define D1   (1)
-#define D2   (2)
-#define D3   (3)
-#define D4   (4)
-#define D5   (5)
-#define D6   (6)
-#define D7   (7)
-#define D8   (8)
-#define D9   (9)
-#define D10   (10)
-#define D11   (11)
-#define D12   (12)
-#define D13   (13)
-#endif
-
-// Assigned pins on arduino
-const int DA0_pin         = D0;   // AY38910 DA0
-const int DA1_pin         = D1;   // AY38910 DA1
-const int DA2_pin         = D2;   // AY38910 DA2
-
-const int DA3_pin         = D3;   // AY38910 DA3
-//const int DA3_pin         = A2;   // AY38910 DA3
-
-const int DA4_pin         = D4;   // AY38910 DA4
-const int DA5_pin         = D5;   // AY38910 DA5
-const int DA6_pin         = D6;   // AY38910 DA6
-const int DA7_pin         = D7;   // AY38910 DA7
-const int BC1_pin         = D8;   // AY38910 BC1
-
-//const int BDIR_pin        = D9;   // AY38910 BDIR
-const int BDIR_pin        = A2;   // AY38910 BDIR
-
-const int CS_SDCARD_pin   = D10;  // SD card CS (chip select)
-const int MOSI_SDCARD_pin = D11;  // SD card MOSI
-const int MISO_SDCARD_pin = D12;  // SD card MISO
-const int SCK_SDCARD_pin  = D13;  // SD card SCK
-const int ResetAY_pin     = A3;   // AY38910 RESET
-const int NextButton_pin  = A7;   // user input
-// SDA=A4,SCL=A5   128x32 i2c OLED - 0.96".
-
-// Aiming for PWM of 50HZ, so interrupt triggers every 20ms
-// 62500MHz / duty 250 = 250 interrupts per second (so will scale by 5 in ISR code)
-const byte dutyCycleTimer2 = 250;   // note: timer 2 has a 8 bit resolution
-
-// AY38910 Registers
-enum {
-  PSG_REG_FREQ_A_LO = 0,
-  PSG_REG_FREQ_A_HI,
-  PSG_REG_FREQ_B_LO,
-  PSG_REG_FREQ_B_HI,
-  PSG_REG_FREQ_C_LO,
-  PSG_REG_FREQ_C_HI,
-  PSG_REG_FREQ_NOISE,
-  PSG_REG_IO_MIXER,
-  PSG_REG_LVL_A,
-  PSG_REG_LVL_B,
-  PSG_REG_LVL_C,
-  PSG_REG_FREQ_ENV_LO,
-  PSG_REG_FREQ_ENV_HI,
-  PSG_REG_ENV_SHAPE,
-  PSG_REG_IOA,
-  PSG_REG_IOB,
-  PSG_REG_TOTAL
-};
-
-SSD1306AsciiAvrI2c oled;
 File root;
 File file;
 
-//volatile bool refresh = true;
-
 enum  { FLAG_NEXT_TUNE, FLAG_BACK_TUNE, FLAG_PLAY_TUNE, FLAG_BUTTON_DOWN, FLAG_BUTTON_REPEAT, FLAG_REFRESH_DISPLAY }; // 8 or less items here (byte)
-
 volatile byte playFlag;
-
-#define VU_METER_INTERNAL_SCALE (2)  // speed scale 2^n values
 
 int filesCount = 0;
 int fileIndex = 0;            // file indexes start from zero
@@ -206,9 +143,7 @@ SD_CARD_MISSING_RETRY:
     goto SD_CARD_MISSING_RETRY;
   }
 
-
   selectFile(fileIndex);
-
   // pre fill cache, give things a head start.
   for (int i = 0; i < BUFFER_SIZE; i++ ) {
     cacheSingleByteRead();
@@ -219,14 +154,10 @@ SD_CARD_MISSING_RETRY:
 
   bitSet(playFlag, FLAG_PLAY_TUNE);
   bitSet(playFlag, FLAG_REFRESH_DISPLAY);
-
 }
 
 void loop() {
-  
   if  (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
-
-
     int but = analogRead(NextButton_pin);
     if (but > 2700)
       bitSet(playFlag, FLAG_BACK_TUNE);
@@ -250,7 +181,6 @@ void loop() {
       }
 
       if (bitRead(playFlag, FLAG_PLAY_TUNE)) {
-        //  if (count == 0) {
         bitClear(playFlag, FLAG_PLAY_TUNE);
         resetAY();
         
@@ -259,17 +189,19 @@ void loop() {
         selectFile(fileIndex);
         oled.setCursor(0, DISPLAY_ROW_FILENAME);
         
-        //We can see that the SD source code has:  char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
-        file.name()[strlen(file.name())]= ' ';  //  HACK... this kind of all fine, don't panic
-        
+        //Since the SD source code has:  char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
+        for (int i=0; i < (12-strlen(file.name())) ; i++) {
+          file.name()[12-1-i]= ' ';  //  HACK... this kind of all fine, don't panic
+        }   
         oled.print((char*)file.name());  // becase of the above fudge, this will disaply all 12 characters - so will clear old shorter names
       }
+      
+      oled.setCursor(0, DISPLAY_ROW_FILE_COUNTER);
+      oled.print(fileIndex + 1);
+      oled.print(F("/"));
+      oled.print(filesCount);
     }
-    oled.setCursor(0, DISPLAY_ROW_FILE_COUNTER);
-    oled.print(fileIndex + 1);
-    oled.print(F("/"));
-    oled.print(filesCount);
-
+    
     oled.setCursor((128 / 2) - 6 - 6 - 6, DISPLAY_ROW_VU_METER_TOP);
     displayVuMeterTopPar(volumeChannelA / VU_METER_INTERNAL_SCALE); // dividing by 2, scaled maths used (*2 scale used setting VU meter)
     displayVuMeterTopPar(volumeChannelB / VU_METER_INTERNAL_SCALE);
@@ -282,7 +214,6 @@ void loop() {
 
     oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
     oled.print(fileSize / 1024);
-    // oled.print(next, DEC);
     oled.print("K ");
 
     volumeChannelA--;  // drift all the VU meters down over time (values are internally scaled)
@@ -291,21 +222,9 @@ void loop() {
 
     bitClear(playFlag, FLAG_REFRESH_DISPLAY);
     count -= (256 / 32); // letting byte wrap
-
   }
-
   cacheSingleByteRead();  //cache more music data if needed
 }
-
-// NOTE: BC2 tied to +5v
-// ----------------------------------
-// BDIR   BC2   BC1   PSG FUNCTION
-// ----+-----+-----+-----------------
-// 0      1      0    INACTIVE
-// 0      1      1    READ FROM PSG (not needed)
-// 1      1      0    WRITE TO PSG
-// 1      1      1    LATCH ADDRESS
-// ----------------------------------
 
 // Generate two bus control signals for AY/PSG pins (BDIR and BC1) over the port
 // PORTB maps to Arduino digital pins 8 to 13 (PB0 to PB5)
@@ -385,9 +304,9 @@ void playNotes() {
             // keeps doing this special timing adjustment for the last 32 bytes read
           }
           else {
-            if (!bitRead(playFlag, FLAG_BUTTON_REPEAT)) {
+           // if (!bitRead(playFlag, FLAG_BUTTON_REPEAT)) {
               interruptCountSkip = b << 2; //   x4, to make each a 80 ms wait
-            }
+         //   }
           }
           return;
         } else {
@@ -395,7 +314,7 @@ void playNotes() {
           circularBufferReadIndex -= 2; // canceling  that last advance
         }
         break;
-      case END_OF_MUSIC_0xFD:   bitSet(playFlag, FLAG_PLAY_TUNE);  return;
+      case END_OF_MUSIC_0xFD:     bitSet(playFlag, FLAG_NEXT_TUNE);  return;
       default:  // 0x00 to 0xFC
         if (isCacheReady()) {
           writeAY(b, playBuf[circularBufferReadIndex]);
@@ -492,12 +411,20 @@ void setupPins() {
 
 
 ISR(TIMER2_COMPA_vect) {
+//    static volatile byte ddd=0;   // DEBUG TEST ... REMOVE ME
   static volatile byte ScaleCounter=0;
   // 50 Hz, 250 interrupts per second / 50 = 5 steps per 20ms 
   if (++ScaleCounter >= (dutyCycleTimer2 /50) ) {
-    playNotes();
+
+    if (interruptCountSkip>0){
+ //     oled.setCursor(80, 0);
+//      oled.print(ddd++);
+      interruptCountSkip--;
+    }else{
+      playNotes();
+    }
     ScaleCounter=0;
-    bitSet(playFlag, FLAG_REFRESH_DISPLAY);
+    bitSet(playFlag, FLAG_REFRESH_DISPLAY); 
   }
 }
 
