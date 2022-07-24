@@ -65,17 +65,50 @@ byte playBuf[BUFFER_SIZE];  // PICK ONE OF THE ABOVE BUFFER SIZES
 
 enum AYMode { INACTIVE, WRITE, LATCH_ADDRESS };
 
+#ifndef A0
+#define A0   (14)
+#define A1   (15)
+#define A2   (16)
+#define A3   (17)
+#define A4   (18)
+#define A5   (19)
+#define A6   (20)
+#define A7   (21)
+#endif
+#ifndef D0
+#define D0   (0)
+#define D1   (1)
+#define D2   (2)
+#define D3   (3)
+#define D4   (4)
+#define D5   (5)
+#define D6   (6)
+#define D7   (7)
+#define D8   (8)
+#define D9   (9)
+#define D10   (10)
+#define D11   (11)
+#define D12   (12)
+#define D13   (13)
+#endif
+
 // Assigned pins on arduino
 const int DA0_pin         = D0;   // AY38910 DA0
 const int DA1_pin         = D1;   // AY38910 DA1
 const int DA2_pin         = D2;   // AY38910 DA2
-const int DA3_pin         = A2;   // AY38910 DA3
+
+const int DA3_pin         = D3;   // AY38910 DA3
+//const int DA3_pin         = A2;   // AY38910 DA3
+
 const int DA4_pin         = D4;   // AY38910 DA4
 const int DA5_pin         = D5;   // AY38910 DA5
 const int DA6_pin         = D6;   // AY38910 DA6
 const int DA7_pin         = D7;   // AY38910 DA7
 const int BC1_pin         = D8;   // AY38910 BC1
-const int BDIR_pin        = D9;   // AY38910 BDIR
+
+//const int BDIR_pin        = D9;   // AY38910 BDIR
+const int BDIR_pin        = A2;   // AY38910 BDIR
+
 const int CS_SDCARD_pin   = D10;  // SD card CS (chip select)
 const int MOSI_SDCARD_pin = D11;  // SD card MOSI
 const int MISO_SDCARD_pin = D12;  // SD card MISO
@@ -83,6 +116,10 @@ const int SCK_SDCARD_pin  = D13;  // SD card SCK
 const int ResetAY_pin     = A3;   // AY38910 RESET
 const int NextButton_pin  = A7;   // user input
 // SDA=A4,SCL=A5   128x32 i2c OLED - 0.96".
+
+// Aiming for PWM of 50HZ, so interrupt triggers every 20ms
+// 62500MHz / duty 250 = 250 interrupts per second (so will scale by 5 in ISR code)
+const byte dutyCycleTimer2 = 250;   // note: timer 2 has a 8 bit resolution
 
 // AY38910 Registers
 enum {
@@ -138,7 +175,7 @@ extern void setupPins();
 extern void resetAY();
 extern  void setupClockForAYChip();
 extern void setupOled();
-extern void countPlayableFiles();
+extern int countPlayableFiles();
 extern void setupProcessLogicTimer();
 extern void selectFile(int index);
 extern void cacheSingleByteRead();
@@ -156,25 +193,19 @@ void setup() {
 
   setupPins();
   resetAY();
-
-
   setupOled();
 
 SD_CARD_MISSING_RETRY:
   delay(1500);  // time to read the VERSION
 
-  // The SD card reader must keep up with the logic process (both run at 50MHz)
-  //if (m_sd.begin(pinCS_SDCARD, SD_SCK_MHZ(50))) {
   if (SD.begin(CS_SDCARD_pin)) {
     root = SD.open("/");
-    countPlayableFiles();
+    filesCount = countPlayableFiles();
   } else {
     oled.println(F("Waiting for SD card"));
     goto SD_CARD_MISSING_RETRY;
   }
 
-  bitSet(playFlag, FLAG_PLAY_TUNE);
-  bitSet(playFlag, FLAG_REFRESH_DISPLAY);
 
   selectFile(fileIndex);
 
@@ -185,10 +216,14 @@ SD_CARD_MISSING_RETRY:
 
   setupClockForAYChip();
   setupProcessLogicTimer(); // start the logic interrupt up last
+
+  bitSet(playFlag, FLAG_PLAY_TUNE);
+  bitSet(playFlag, FLAG_REFRESH_DISPLAY);
+
 }
 
 void loop() {
-
+  
   if  (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
 
 
@@ -304,23 +339,23 @@ void setAYMode(AYMode mode) {
 // Send latching data via 74HC595 to AY chip + Update VU meter
 // (74HC595 used as limited amount of pins available on a Arduino pro mini)
 // NOTE: *** Used by interrupt, keep code lightweight ***
-void writeAY( byte port , byte control ) {
+void writeAY( byte port , byte ctrl ) {
   if (port < PSG_REG_TOTAL) {
     setAYMode(LATCH_ADDRESS);
     PORTD = port;
-    digitalWrite(DA3_pin, port & B00001000);
+ //   digitalWrite(DA3_pin, port & B00001000);
     setAYMode(INACTIVE);
 
     setAYMode(WRITE);
-    PORTD = control;
-    digitalWrite(DA3_pin, control & B00001000);
+    PORTD = ctrl;
+   // digitalWrite(DA3_pin, control & B00001000);
     setAYMode(INACTIVE);
 
     switch (port) {
-      case PSG_REG_LVL_A: volumeChannelA = control * VU_METER_INTERNAL_SCALE; break; // *2 for scaled maths (VU meter speed)
-      case PSG_REG_LVL_B: volumeChannelB = control * VU_METER_INTERNAL_SCALE; break;
-      case PSG_REG_LVL_C: volumeChannelC = control * VU_METER_INTERNAL_SCALE; break;
-      case PSG_REG_ENV_SHAPE: if (control == 255) return; // Envelope bugfix ???? NOT TESTED
+      case PSG_REG_LVL_A: volumeChannelA = ctrl * VU_METER_INTERNAL_SCALE; break; // *2 for scaled maths (VU meter speed)
+      case PSG_REG_LVL_B: volumeChannelB = ctrl * VU_METER_INTERNAL_SCALE; break;
+      case PSG_REG_LVL_C: volumeChannelC = ctrl * VU_METER_INTERNAL_SCALE; break;
+      case PSG_REG_ENV_SHAPE: if (ctrl == 255) return; // Envelope bugfix ???? NOT TESTED
     }
   }
 }
@@ -374,23 +409,6 @@ void playNotes() {
   }
 }
 
-// Timer/Counter1 Compare Match A
-// 20ms
-ISR(TIMER1_COMPA_vect) {
-
-
-  // 730, 2040, 2800, 4200
-  // 22 , 326, 515, 842
-
-
-  playNotes();
-
-  bitSet(playFlag, FLAG_REFRESH_DISPLAY);
-
-  // refresh = true;
-
-}
-
 // Q: Why top and bottom functions?
 // A: Two character are joined to make a tall VU meter.
 inline void displayVuMeterTopPar(byte volume) {
@@ -438,9 +456,17 @@ void setupPins() {
   // Pins 0 to 7 used for AY data however pin 3 'D3' is taken.
   // So need one more bit elsewhere, pin 'A2' is used to fill in for that missing bit.
   //      -----x--
-  DDRD  = B11111111;     // set pins 0 to 7 as OUTPUT
-  PORTD = B11111011;            // clear AY byte Data pins 0,1,x,3,4,5,6,7
-  pinMode(A2, OUTPUT);  // AY data pin 3 is sent via pin 'A2'
+ // DDRD  = B11111111;     // set pins 0 to 7 as OUTPUT
+ // PORTD = B11111011;            // clear AY byte Data pins 0,1,x,3,4,5,6,7
+
+  DDRD = 0xff;
+  PORTD =0;
+
+ pinMode(D9, OUTPUT);
+
+
+  pinMode(A2, OUTPUT);
+ // pinMode(A2, OUTPUT);  // AY data pin 3 is sent via pin 'A2'
 
   // Assign pins for the AY Chip
   pinMode(ResetAY_pin, OUTPUT);
@@ -458,6 +484,23 @@ void setupPins() {
 
 }
 
+// Three Arduino Timers 
+// Timer0: 8 bits; Used by libs, e.g millis(), micros(), delay()
+// Timer1: 16 bits; Use by Servo, VirtualWire and TimerOne library
+// Timer2: 8 bits; Used by the tone() function
+
+
+
+ISR(TIMER2_COMPA_vect) {
+  static volatile byte ScaleCounter=0;
+  // 50 Hz, 250 interrupts per second / 50 = 5 steps per 20ms 
+  if (++ScaleCounter >= (dutyCycleTimer2 /50) ) {
+    playNotes();
+    ScaleCounter=0;
+    bitSet(playFlag, FLAG_REFRESH_DISPLAY);
+  }
+}
+
 
 //Each Timer/Counter has two output compare pins.
 //Timer/Counter 0 OC0A and OC0B pins are called PWM pins 6 and 5 respectively.
@@ -465,41 +508,42 @@ void setupPins() {
 //Timer/counter 2 OC2A and OC2B pins are called PWM pins 11 and 3 respectively.
 
 
-// The AY38910 clock pin needs to be driven at a frequency of 1.75 MHz.
-// We can get an interrupt to trigger at (16/9) 1.778 MHz ( 1.5873% difference, close enough)
-//
-// The ZX Spectrum's 128K's AY soundchip is fed with a 1.7734MHz clock  (CPU clock: 3.5469/2=1.77345)
-// This player is mostly aimed at PSG files coming from he speccy
-//
-#define PERIOD  (9)                 // 9 CPU cycles (or 1.778 MHz)
+// The AY38910 clock pin
+// The ZX Spectrum's 128K's AY soundchip is fed with a 1.7734MHz clock  (speccy Z80 CPU 3.5469/2=1.77345)       
 void setupClockForAYChip() {
-  pinMode(3, OUTPUT);
-  //  pinMode(11, OUTPUT);
-
-  TCCR2B = 0;                       // stop timer
-  TCNT2 = 0;                        // reset timer/counter2
-  TCCR2A = _BV(COM2B1)              // non-inverting PWM on OC2B (pin3)
-           | _BV(WGM20) | _BV(WGM21); // fast PWM mode, TOP=OCR2A
-  TCCR2B = _BV(WGM22) | _BV(CS20);  //
-  OCR2A = PERIOD - 1;               // timer2 counts from 0 to 8 (9 cycles at 16 MHz)
-  OCR2B = (PERIOD / 2) - 1;         // duty cycle (remains high count part)
+  TCCR1A = bit(COM1A0);
+  TCCR1B = bit(WGM12) | bit(CS10);
+  OCR1A = 3;   // set a 2MHz frequence
+  pinMode(9, OUTPUT);
 }
 
-// Clear Timer on Compare
-// Interrupt on "Timer/Counter1 Compare Match A" (see ISR function)
-// 16000000 (ATmega16MHz) / 256 prescaler = 62500ms , 62500ms / 1250 counts = 50ms
-// 1000ms / 50ms = 20ms
+
+// Setup 8-bit timer2 to trigger interrupt (see ISR function)
 void setupProcessLogicTimer() {
-  cli();                            // Disable interrupts while setting up
-  TCCR1A = 0;                       // Timer/Counter Control register
-  TCNT1 = 0;                        // Timer/Counter Register
-  TCCR1B = _BV(WGM12) | _BV(CS12);  // CTC mode,256 prescaler
-  TIMSK1 = _BV(OCIE1A);             // Enable timer compare interrupt
-  OCR1A = 1250;                      // compared against TCNT1 if same ISR is called
-  sei();                            // enable interrupt
+
+// History: Calculating prescaler and duty 
+// Looking for any of these to be a multiple of 50HZ
+//  15625   1024 ...  1, 5, 25, 125 ... NO - nothing here fits my 50HZ target
+//  62500    256 ...  1, 2, 4, 5, 10, 20, 25, 50, 100, 125, >>>> 250 WINNER <<<<<
+//  125000   128 ...  1, 2, 4, 5, 8, 10, 20, 25, 40, 50, 100, 125, 200, 250 ... NOPE To fast
+//  250000    64 ...  1, 2, 4, 5, 8, 10, 16, 20, 25, 40, 50, 80, 100, 125, 200, 250 - NOPE, yeah way to fast 
+
+  cli();                            // Disable interrupts
+
+  TCCR2A = _BV(WGM21);              // CTC mode (Clear Timer and Compare)             
+  // 16000000 (ATmega16MHz) / 256 prescaler = 62500MHz
+  // 62500MHz Timer Clock =  16000000MHz / 256
+  TCCR2B =  _BV(CS22) | _BV(CS21);  // 256 prescaler  (CS22=1,CS21=1,CS20=0)
+  OCR2A = dutyCycleTimer2;          // Set the compare value to control duty cycle                  
+  TIFR2 |= _BV(OCF2A);              // Clear pending interrupts  
+  TIMSK2 = _BV(OCIE2A);             // Enable Timer 2 Output Compare Match Interrupt      
+  TCNT2 = 0;                        // Timer counter 2
+  
+  sei();                            // enable interrupts
+
+  // https://onlinedocs.microchip.com/pr/GUID-93DE33AC-A8E1-4DD9-BDA3-C76C7CB80969-en-US-2/index.html?GUID-669CCBF6-D4FD-4E1D-AF92-62E9914559AA
+  
 }
-
-
 
 // Skip header information
 // Example of Header(16 bytes) followed by the start of the raw byte data
@@ -507,47 +551,37 @@ void setupProcessLogicTimer() {
 // DATA  : FF FF 00 F9 06 16 07 38 FF 00 69 06 17 FF 00 F9 ...
 //         ^^ ^^
 inline int advancePastHeader() {
-  //circularBufferLoadIndex = circularBufferReadIndex = 0;
-  //    while (file.available()) {
-  //      byte b = file.read();
-  //      if (b == 0xFF) {
-  //        // The raw data always starts with two 0xFF's, we use this FF marker to skip past the header.
-  //        // Note: We only need to find the first FF.. the player code will see the next FF
-  //        //       and treat it as a do nothing 20ms pause.  I have no idea if that's the plan for this PSG format
-  //        //       I'm doubting anyone will care (i.e. instead do two FF's giving a longer pause).
-  //        break;
-  //      }
-  //    }
   file.seek(16); // absolute position
   return 16;
 }
 
 // Here we are checking for the "PSG" file header, byte by byte.
+// note: if found, global file will have advanced 3 bytes
 bool isFilePSG() {
   if (file) {
     if (!file.isDirectory()) {
       // Doing every little bit to save some dynamic memory.
-      // Could put "PSG" in program mem, but that would still require a counter eating away at the stack (yes one byte but I'm very low on mem)
-      bool result = (file.available() && file.read() == 'P' && file.available() &&  file.read() == 'S' && file.available() && file.read() == 'G');
-      return result; // note: at this point file will have advanced 3 bytes
+      // Could put "PSG" in program mem, but that would still require a counter eating away at the stack (yes one byte but I'm very low on stack/memory)
+     return (file.available() && file.read() == 'P' && file.available() &&  file.read() == 'S' && file.available() && file.read() == 'G');
     }
   }
   return false;
 }
 
-void countPlayableFiles() {
+int countPlayableFiles() {
+  int count=0;
   while (true) {
-    file =  root.openNextFile();
+    file = root.openNextFile();
     if (!file) {
       break;
     }
     if (isFilePSG()) {
-      //if (!file.isDirectory()) {
-      filesCount++;
+      count++;
     }
     file.close();
   }
   root.rewindDirectory();
+  return count;
 }
 
 void selectFile(int fileIndex) { // optimise
@@ -661,3 +695,7 @@ void loop_TEST() {
    }
   }
 */
+
+
+ // 730, 2040, 2800, 4200
+  // 22 , 326, 515, 842
