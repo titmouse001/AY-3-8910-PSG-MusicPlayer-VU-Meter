@@ -167,8 +167,7 @@ SD_CARD_MISSING_RETRY:
   bitSet(playFlag, FLAG_PLAY_TUNE);
   bitSet(playFlag, FLAG_REFRESH_DISPLAY);
 }
-
-
+     
 void loop() {
   if  (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
     int but = analogRead(NextButton_pin);
@@ -225,26 +224,28 @@ void loop() {
     topAudioVoltage = max(topAudioVoltage, audioC);
     // Allow audio to dip over time
     topAudioVoltage--;   // works in synergy with the above max lines
+    // Note: at this point we scale down to use BYTE sized data
     // scale down incoming audio voltages (0 to 15)
     audioA = map(audioA, baseAudioVoltage, topAudioVoltage, 0, 15);
     audioB = map(audioB, baseAudioVoltage, topAudioVoltage, 0, 15);
     audioC = map(audioC, baseAudioVoltage, topAudioVoltage, 0, 15);
-    // keep track of previos values used
+    // keep track of previos values used including the slide down
     volumeChannelA_Prev = volumeChannelA;
     volumeChannelB_Prev = volumeChannelB;
     volumeChannelC_Prev = volumeChannelC;
     
-    if (audioA > volumeChannelA_Prev)
-      volumeChannelA = audioA;
+    // Note: volumeChannelX will never go negative as audioX can't
+    if (audioA >= volumeChannelA_Prev)
+      volumeChannelA = audioA;  // Fresh audio detected, refresh UV meter
     else
-      volumeChannelA--;
+      volumeChannelA--;         // slide down over time
 
-    if (audioB > volumeChannelB_Prev)
+    if (audioB >= volumeChannelB_Prev)
       volumeChannelB = audioB;
     else
       volumeChannelB--;
 
-    if (audioC > volumeChannelC_Prev)
+    if (audioC >= volumeChannelC_Prev)
       volumeChannelC = audioC;
     else
       volumeChannelC--;
