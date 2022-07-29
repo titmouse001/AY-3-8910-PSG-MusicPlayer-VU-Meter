@@ -38,14 +38,19 @@ const int DA0_pin         = D0;   // AY38910 DA0
 const int DA1_pin         = D1;   // AY38910 DA1
 const int DA2_pin         = D2;   // AY38910 DA2
 const int DA3_pin         = D3;   // AY38910 DA3
-//const int DA3_pin         = A2;   // AY38910 DA3
 const int DA4_pin         = D4;   // AY38910 DA4
 const int DA5_pin         = D5;   // AY38910 DA5
 const int DA6_pin         = D6;   // AY38910 DA6
 const int DA7_pin         = D7;   // AY38910 DA7
+
 const int BC1_pin         = D8;   // AY38910 BC1
-//const int BDIR_pin        = D9;   // AY38910 BDIR
+const int AY_Clock_pin    = D9;   // AY38910 CLOCK
 const int BDIR_pin        = A2;   // AY38910 BDIR
+
+const int AY_AUDIO_A      = A0;   // AY38910 BDIR
+const int AY_AUDIO_B      = A1;   // AY38910 BDIR
+const int AY_AUDIO_C      = A6;   // AY38910 BDIR
+
 const int CS_SDCARD_pin   = D10;  // SD card CS (chip select)
 const int MOSI_SDCARD_pin = D11;  // SD card MOSI
 const int MISO_SDCARD_pin = D12;  // SD card MISO
