@@ -16,7 +16,7 @@
 #include "pins.h"
 #include "AY3891xRegisters.h"
 
-#define VERSION ("1.1")
+#define VERSION ("1.2")
 
 
 // ********************************************************************
@@ -25,11 +25,11 @@
 //
 // OPTION 1:   - ATmega328(2K) allows optimised counters
 // ========
-//#define BUFFER_SIZE (256)
+#define BUFFER_SIZE (256)
 //
 // OPTION 2:   - ATmega168(1K) code uses a smaller buffer
 // ========
-#define BUFFER_SIZE (64)
+//#define BUFFER_SIZE (64)
 //
 // ********************************************************************
 
@@ -69,7 +69,7 @@ enum AYMode { INACTIVE, WRITE, LATCH_ADDRESS };
 // 1      1      1    LATCH ADDRESS
 // ----------------------------------
 
-// Arduino Timer2  (8-bit timer) 
+// Arduino Timer2  (8-bit timer)
 // Aiming for PWM of 50HZ, so interrupt triggers every 20ms if possible
 // 16000000Hz / 256  = 62500Hz
 // 62500Hz / duty 250 = 250 interrupts per second (so will scale by 5 in ISR code)
@@ -78,13 +78,13 @@ const byte DUTY_CYCLE_FOR_TIMER2 = 250;   // note: timer 2 has a 8 bit resolutio
 //
 // History: for calculating the above values for prescaler and duty
 // Looking for any of these to be a multiple of 50HZ
-//1024: (16000000Hz / 1024 prescale) = 15625Hz  
+//1024: (16000000Hz / 1024 prescale) = 15625Hz
 //   1, 5, 25, 125 ... NO - nothing here fits my 50HZ target i.e. (125/50 = 2.5)
 //256:  (16000000Hz / 256 prescale)  = 62500Hz
 //   1, 2, 4, 5, 10, 20, 25, 50, 100, 125, >>>> 250 WINNER <<<<<
-//128:  (16000000Hz / 128 prescale)  = 125000Hz 
+//128:  (16000000Hz / 128 prescale)  = 125000Hz
 //   1, 2, 4, 5, 8, 10, 20, 25, 40, 50, 100, 125, 200, 250 ... NOPE To fast
-// 64:  (16000000Hz / 64 prescale)   = 250000Hz 
+// 64:  (16000000Hz / 64 prescale)   = 250000Hz
 //   1, 2, 4, 5, 8, 10, 16, 20, 25, 40, 50, 80, 100, 125, 200, 250 - NOPE, yeah way to fast
 //
 #define I2C_ADDRESS 0x3C  // 0x3C or 0x3D
@@ -102,7 +102,7 @@ SSD1306AsciiAvrI2c oled;
 File root;  // 'File' struct takes 27 bytes
 File file;
 
-enum  { FLAG_NEXT_TUNE, FLAG_BACK_TUNE, FLAG_PLAY_TUNE, FLAG_BUTTON_DOWN, FLAG_BUTTON_REPEAT, FLAG_REFRESH_DISPLAY }; // 8 or less items here (byte)
+enum  { FLAG_NEXT_TUNE, FLAG_BACK_TUNE, FLAG_PLAY_TUNE, FLAG_BUTTON_REPEAT, FLAG_REFRESH_DISPLAY }; // 8 or less items here (byte)
 volatile byte playFlag;
 
 int filesCount = 0;
@@ -351,53 +351,50 @@ void writeAY( byte port , byte ctrl ) {
   }
 }
 
+inline bool readBuffer(byte& dat) {
+  if (isCacheReady()) {
+    dat = playBuf[circularBufferReadIndex]; 
+    ADVANCE_PLAY_BUFFER
+    return true;
+  }
+  else {
+    return false;
+  }
+}
+
 // PSG music format (body)
 // [0xff]              : End of interrupt (EOI) - waits for 20 ms
 // [0xfe],[byte]       : Multiple EOI, following byte provides how many times to wait 80ms.
 // [0xfd]              : End Of Music
 // [0x00..0x0f],[byte] : PSG register, following byte is accompanying data for this register
 // (Again... This method need to be lightweight as it's part of the interrupt)
-void playNotes() {
-  while (isCacheReady()) {
-    byte b = playBuf[circularBufferReadIndex];
-    ADVANCE_PLAY_BUFFER
-    switch (b) {
-      case END_OF_INTERRUPT_0xFF: return;
-      case END_OF_INTERRUPT_MULTIPLE_0xFE:
-        if (isCacheReady()) {
-          b = playBuf[circularBufferReadIndex];
-          ADVANCE_PLAY_BUFFER
 
-          if ((b == 0xff) && (fileSize / 32 == 0) )  {
+
+void playNotes() {
+byte action,dat;
+  while (readBuffer(action)) {
+    switch (action) { 
+      case END_OF_MUSIC_0xFD: bitSet(playFlag, FLAG_NEXT_TUNE);  return;
+      case END_OF_INTERRUPT_0xFF: return;
+    }
+    if (readBuffer(dat)) {
+      switch (action) {  
+        case END_OF_INTERRUPT_MULTIPLE_0xFE:
+          if ((dat == 0xff) && (fileSize / 32 == 0)) {
             // Some tunes have very long pauses at the end (caused by repeated sequences of "0xfe 0xff").
             // For example "NewZealandStoryThe.psg" has a very long pause at the end, I'm guessing by design to handover to the ingame tune.
-            interruptCountSkip = 4; // 4 works well for me! Forcing shorter pauses, but only when nearing the end of the tune and its FF
-            resetAY();
-
-            //   baseVoltage2 = 0;
-            // keeps doing this special timing adjustment for the last 32 bytes read
+            interruptCountSkip = 4; // 4 works ok on trouble tunes as a replacement pause
           }
           else {
-            // if (!bitRead(playFlag, FLAG_BUTTON_REPEAT)) {
-            interruptCountSkip = b << 2; //   x4, to make each a 80 ms wait
-            //   }
+            interruptCountSkip = dat << 2; //   x4, to make each a 80 ms wait - part of formats standard
           }
-          return;
-        } else {
-          // cache not ready, need to wait a bit. Rewinding back to the starting command.
-          circularBufferReadIndex -= 2; // canceling  that last advance
-        }
-        break;
-      case END_OF_MUSIC_0xFD:     bitSet(playFlag, FLAG_NEXT_TUNE);  return;
-      default:  // 0x00 to 0xFC
-        if (isCacheReady()) {
-          writeAY(b, playBuf[circularBufferReadIndex]);
-          ADVANCE_PLAY_BUFFER
-        } else {
-          // cache not ready, need to wait a bit. Rewinding back to the starting command.
-          circularBufferReadIndex -= 2; // canceling  that last advance
-        }
-        break;
+          return; // task done
+        default:  // 0x00 to 0xFC  
+          writeAY(action, dat); // port & control regisiter
+          break;
+      }
+    } else {
+      circularBufferReadIndex--;
     }
   }
 }
@@ -495,9 +492,9 @@ void setupPins() {
 
 ISR(TIMER2_COMPA_vect) {
 
-// internal counter to slow things down (
-  volatile static byte ScaleCounter = 0; 
-  
+  // internal counter to slow things down (
+  volatile static byte ScaleCounter = 0;
+
   // Sample AY channels A,B and C
   audioAsum += analogRead(AY_AUDIO_A);
   audioBsum += analogRead(AY_AUDIO_B);
@@ -636,8 +633,8 @@ void cacheSingleByteRead() {
   if (circularBufferLoadIndex == (BUFFER_SIZE - 1) && circularBufferReadIndex == 0)  // cache is behind
     return ;
 
-  if (fileSize >= 1) { // file.available()) {
-    playBuf[circularBufferLoadIndex] =  file.read();
+  if (fileSize >= 1) {
+    playBuf[circularBufferLoadIndex] = file.read();
     fileSize--;
   }
   else {
