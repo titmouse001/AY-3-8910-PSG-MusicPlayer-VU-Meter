@@ -69,11 +69,24 @@ enum AYMode { INACTIVE, WRITE, LATCH_ADDRESS };
 // 1      1      1    LATCH ADDRESS
 // ----------------------------------
 
-// Arduino Timer 2
-// Aiming for PWM of 50HZ, so interrupt triggers every 20ms
-// 62500MHz / duty 250 = 250 interrupts per second (so will scale by 5 in ISR code)
-const byte dutyCycleTimer2 = 250;   // note: timer 2 has a 8 bit resolution
-
+// Arduino Timer2  (8-bit timer) 
+// Aiming for PWM of 50HZ, so interrupt triggers every 20ms if possible
+// 16000000Hz / 256  = 62500Hz
+// 62500Hz / duty 250 = 250 interrupts per second (so will scale by 5 in ISR code)
+//
+const byte DUTY_CYCLE_FOR_TIMER2 = 250;   // note: timer 2 has a 8 bit resolution
+//
+// History: for calculating the above values for prescaler and duty
+// Looking for any of these to be a multiple of 50HZ
+//1024: (16000000Hz / 1024 prescale) = 15625Hz  
+//   1, 5, 25, 125 ... NO - nothing here fits my 50HZ target i.e. (125/50 = 2.5)
+//256:  (16000000Hz / 256 prescale)  = 62500Hz
+//   1, 2, 4, 5, 10, 20, 25, 50, 100, 125, >>>> 250 WINNER <<<<<
+//128:  (16000000Hz / 128 prescale)  = 125000Hz 
+//   1, 2, 4, 5, 8, 10, 20, 25, 40, 50, 100, 125, 200, 250 ... NOPE To fast
+// 64:  (16000000Hz / 64 prescale)   = 250000Hz 
+//   1, 2, 4, 5, 8, 10, 16, 20, 25, 40, 50, 80, 100, 125, 200, 250 - NOPE, yeah way to fast
+//
 #define I2C_ADDRESS 0x3C  // 0x3C or 0x3D
 SSD1306AsciiAvrI2c oled;
 // Display Character Rows
@@ -128,6 +141,13 @@ extern void setAYMode(AYMode mode);
 int baseAudioVoltage = 0; // initialised once in setup for VU meter - lowest point posible
 int topAudioVoltage = 0; // for VU meter stepup - highest point posible
 
+volatile int audioAsum = 0;
+volatile int audioBsum = 0;
+volatile int audioCsum = 0;
+volatile int audioMeanA = 0;
+volatile int audioMeanC = 0;
+volatile int audioMeanB = 0;
+
 // startup the display, audit files, fire-up timers at 1.75 MHz'ish, reset AY chip
 void setup() {
 
@@ -167,9 +187,12 @@ SD_CARD_MISSING_RETRY:
   bitSet(playFlag, FLAG_PLAY_TUNE);
   bitSet(playFlag, FLAG_REFRESH_DISPLAY);
 }
-     
+
 void loop() {
+
+
   if  (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
+
     int but = analogRead(NextButton_pin);
     if (but > 2700)
       bitSet(playFlag, FLAG_BACK_TUNE);
@@ -214,26 +237,22 @@ void loop() {
       oled.print(filesCount);
     }
 
-    // Sample AY channels A,B and C
-    int audioA = analogRead(AY_AUDIO_A);
-    int audioB = analogRead(AY_AUDIO_B);
-    int audioC = analogRead(AY_AUDIO_C);
     // find largest top end
-    topAudioVoltage = max(topAudioVoltage, audioA);
-    topAudioVoltage = max(topAudioVoltage, audioB);
-    topAudioVoltage = max(topAudioVoltage, audioC);
+    topAudioVoltage = max(topAudioVoltage, audioMeanA);
+    topAudioVoltage = max(topAudioVoltage, audioMeanB);
+    topAudioVoltage = max(topAudioVoltage, audioMeanC);
     // Allow audio to dip over time
     topAudioVoltage--;   // works in synergy with the above max lines
-    // Note: at this point we scale down to use BYTE sized data
+    // Note: At this point audio data has been scaled to fit into a byte
     // scale down incoming audio voltages (0 to 15)
-    audioA = map(audioA, baseAudioVoltage, topAudioVoltage, 0, 15);
-    audioB = map(audioB, baseAudioVoltage, topAudioVoltage, 0, 15);
-    audioC = map(audioC, baseAudioVoltage, topAudioVoltage, 0, 15);
+    int audioA = map(audioMeanA, baseAudioVoltage, topAudioVoltage, 0, 15);
+    int audioB = map(audioMeanB, baseAudioVoltage, topAudioVoltage, 0, 15);
+    int audioC = map(audioMeanC, baseAudioVoltage, topAudioVoltage, 0, 15);
     // keep track of previos values used including the slide down
     volumeChannelA_Prev = volumeChannelA;
     volumeChannelB_Prev = volumeChannelB;
     volumeChannelC_Prev = volumeChannelC;
-    
+
     // Note: volumeChannelX will never go negative as audioX can't
     if (audioA >= volumeChannelA_Prev)
       volumeChannelA = audioA;  // Fresh audio detected, refresh UV meter
@@ -264,6 +283,7 @@ void loop() {
     oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
     oled.print(fileSize / 1024);
     oled.print("K ");
+
 
     bitClear(playFlag, FLAG_REFRESH_DISPLAY);
     count -= (256 / 32); // letting byte wrap
@@ -385,10 +405,6 @@ void playNotes() {
 // Q: Why top and bottom functions?
 // A: Two characters are joined to make a tall VU meter.
 inline void displayVuMeterTopPar(byte volume) {
-
-  // while (volume > 15) {volume /=2;};
-  //volume/=2;
-
   if (volume > 15)
     volume = 15;
 
@@ -405,8 +421,6 @@ inline void displayVuMeterBottomPar(byte volume) {
   if (volume > 15)
     volume = 15;
 
-  //  while (volume > 15) {volume /=2;};
-  //  volume/=2;
   if (volume < 8) {
     // Note: x8 characters have been redefined for the VU memter starting from '!'
     oled.print( (char) ('!' + (((volume) & 0x07)) ) );
@@ -478,10 +492,27 @@ void setupPins() {
 // Timer1: 16 bits; Use by Servo, VirtualWire and TimerOne library
 // Timer2: 8 bits; Used by the tone() function
 
+
 ISR(TIMER2_COMPA_vect) {
-  volatile static byte ScaleCounter = 0;
+
+// internal counter to slow things down (
+  volatile static byte ScaleCounter = 0; 
+  
+  // Sample AY channels A,B and C
+  audioAsum += analogRead(AY_AUDIO_A);
+  audioBsum += analogRead(AY_AUDIO_B);
+  audioCsum += analogRead(AY_AUDIO_C);
+
   // 50 Hz, 250 interrupts per second / 50 = 5 steps per 20ms
-  if (++ScaleCounter >= (dutyCycleTimer2 / 50) ) {
+  if (++ScaleCounter >= (DUTY_CYCLE_FOR_TIMER2 / 50) ) {
+
+    audioMeanA = audioAsum / (DUTY_CYCLE_FOR_TIMER2 / 50);
+    audioMeanB = audioBsum / (DUTY_CYCLE_FOR_TIMER2 / 50);
+    audioMeanC = audioCsum / (DUTY_CYCLE_FOR_TIMER2 / 50);
+    audioAsum = 0;
+    audioBsum = 0;
+    audioCsum = 0;
+
     if (interruptCountSkip > 0) {
       //     oled.setCursor(80, 0);
       //      oled.print(ddd++);
@@ -490,6 +521,7 @@ ISR(TIMER2_COMPA_vect) {
       playNotes();
     }
     ScaleCounter = 0;
+
     bitSet(playFlag, FLAG_REFRESH_DISPLAY);
   }
 }
@@ -513,29 +545,16 @@ void setupClockForAYChip() {
 
 // Setup 8-bit timer2 to trigger interrupt (see ISR function)
 void setupProcessLogicTimer() {
-
-  // History: Calculating prescaler and duty
-  // Looking for any of these to be a multiple of 50HZ
-  //  15625   1024 ...  1, 5, 25, 125 ... NO - nothing here fits my 50HZ target
-  //  62500    256 ...  1, 2, 4, 5, 10, 20, 25, 50, 100, 125, >>>> 250 WINNER <<<<<
-  //  125000   128 ...  1, 2, 4, 5, 8, 10, 20, 25, 40, 50, 100, 125, 200, 250 ... NOPE To fast
-  //  250000    64 ...  1, 2, 4, 5, 8, 10, 16, 20, 25, 40, 50, 80, 100, 125, 200, 250 - NOPE, yeah way to fast
-
   cli();                            // Disable interrupts
-
   TCCR2A = _BV(WGM21);              // CTC mode (Clear Timer and Compare)
-  // 16000000 (ATmega16MHz) / 256 prescaler = 62500MHz
-  // 62500MHz Timer Clock =  16000000MHz / 256
+  // 16000000Hz (ATmega16MHz) / 256 prescaler = 62500Hz (duty cycle)
   TCCR2B =  _BV(CS22) | _BV(CS21);  // 256 prescaler  (CS22=1,CS21=1,CS20=0)
-  OCR2A = dutyCycleTimer2;          // Set the compare value to control duty cycle
+  OCR2A = DUTY_CYCLE_FOR_TIMER2;          // Set the compare value to control duty cycle
   TIFR2 |= _BV(OCF2A);              // Clear pending interrupts
   TIMSK2 = _BV(OCIE2A);             // Enable Timer 2 Output Compare Match Interrupt
   TCNT2 = 0;                        // Timer counter 2
-
   sei();                            // enable interrupts
-
   // https://onlinedocs.microchip.com/pr/GUID-93DE33AC-A8E1-4DD9-BDA3-C76C7CB80969-en-US-2/index.html?GUID-669CCBF6-D4FD-4E1D-AF92-62E9914559AA
-
 }
 
 // Skip header information
