@@ -353,7 +353,7 @@ void writeAY( byte port , byte ctrl ) {
 
 inline bool readBuffer(byte& dat) {
   if (isCacheReady()) {
-    dat = playBuf[circularBufferReadIndex]; 
+    dat = playBuf[circularBufferReadIndex];
     ADVANCE_PLAY_BUFFER
     return true;
   }
@@ -362,23 +362,23 @@ inline bool readBuffer(byte& dat) {
   }
 }
 
+
 // PSG music format (body)
 // [0xff]              : End of interrupt (EOI) - waits for 20 ms
 // [0xfe],[byte]       : Multiple EOI, following byte provides how many times to wait 80ms.
 // [0xfd]              : End Of Music
 // [0x00..0x0f],[byte] : PSG register, following byte is accompanying data for this register
-// (Again... This method need to be lightweight as it's part of the interrupt)
-
-
-void playNotes() {
-byte action,dat;
+//
+void processPSG() {
+  // Called by interrupt so keep this method as lightweight as possiblle
+  byte action, dat;
   while (readBuffer(action)) {
-    switch (action) { 
+    switch (action) {
       case END_OF_MUSIC_0xFD: bitSet(playFlag, FLAG_NEXT_TUNE);  return;
       case END_OF_INTERRUPT_0xFF: return;
     }
     if (readBuffer(dat)) {
-      switch (action) {  
+      switch (action) {
         case END_OF_INTERRUPT_MULTIPLE_0xFE:
           if ((dat == 0xff) && (fileSize / 32 == 0)) {
             // Some tunes have very long pauses at the end (caused by repeated sequences of "0xfe 0xff").
@@ -388,10 +388,10 @@ byte action,dat;
           else {
             interruptCountSkip = dat << 2; //   x4, to make each a 80 ms wait - part of formats standard
           }
-          return; // task done
-        default:  // 0x00 to 0xFC  
+          return; // get out - tune ask for a do nothing
+        default:  // 0x00 to 0xFC
           writeAY(action, dat); // port & control regisiter
-          break;
+          break;  // read more data - while loop
       }
     } else {
       circularBufferReadIndex--;
@@ -515,7 +515,7 @@ ISR(TIMER2_COMPA_vect) {
       //      oled.print(ddd++);
       interruptCountSkip--;
     } else {
-      playNotes();
+      processPSG();
     }
     ScaleCounter = 0;
 
