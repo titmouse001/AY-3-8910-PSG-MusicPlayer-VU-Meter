@@ -186,6 +186,7 @@ SD_CARD_MISSING_RETRY:
 
   bitSet(playFlag, FLAG_PLAY_TUNE);
   bitSet(playFlag, FLAG_REFRESH_DISPLAY);
+      
 }
 
 void loop() {
@@ -193,13 +194,25 @@ void loop() {
 
   if  (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
 
+//4000 nothing
+//3400
+//2000
+//1300
+//80
     int but = analogRead(NextButton_pin);
-    if (but > 2700)
-      bitSet(playFlag, FLAG_BACK_TUNE);
-    else if (but > 2000)
-      bitSet(playFlag, FLAG_NEXT_TUNE);
 
-    if (count == 0 || but < 100) {
+    if (but > 4000)
+      int g;
+    else if (but > 3400-200)
+      bitSet(playFlag,  FLAG_BACK_TUNE );
+    else if (but > 2000-200)
+      bitSet(playFlag, FLAG_NEXT_TUNE);
+    else if (but > 1300- 200)
+     int g;
+    else 
+     int g;
+     
+    if (count == 0 || but > 4000) {
       if (bitRead(playFlag, FLAG_NEXT_TUNE)) {
         bitClear(playFlag, FLAG_NEXT_TUNE);
         if (++fileIndex >= filesCount) {
@@ -281,7 +294,7 @@ void loop() {
     displayVuMeterBottomPar(volumeChannelC);
 
     oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
-    oled.print(fileSize / 1024);
+    oled.print(but) ;//fileSize / 1024);
     oled.print("K ");
 
 
@@ -598,26 +611,25 @@ void selectFile(int fileIndex) { // optimise
   if (file) {
     file.close();
   }
-
   if (root) {
     root.rewindDirectory();
-    int k = 0;
+    for (int i=0; i<fileIndex-1; i++){
+      file= root.openNextFile();
+      file.close();
+    }
+    int k=0;
     file = root.openNextFile();
     while (file) {
-
       if (isFilePSG()) {
         if (k == fileIndex) {
           fileSize = file.size();
           if (fileSize > 16) { // check we have a body, 16 PSG header
-            // oled.setCursor(0, DISPLAY_ROW_FILENAME);
-            //  oled.print((char*)file.name());
             fileSize -= advancePastHeader();
             break;  // Found it - leave this file open, cache takes over from here on and process it.
           }
         }
         k++;
       }
-
       file.close(); // This isn't the file you're looking for, continue looking.
       file = root.openNextFile();
     }
