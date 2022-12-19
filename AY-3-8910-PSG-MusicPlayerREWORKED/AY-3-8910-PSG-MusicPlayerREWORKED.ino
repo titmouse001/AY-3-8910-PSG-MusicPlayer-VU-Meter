@@ -148,6 +148,7 @@ volatile int audioMeanA = 0;
 volatile int audioMeanC = 0;
 volatile int audioMeanB = 0;
 
+
 // startup the display, audit files, fire-up timers at 1.75 MHz'ish, reset AY chip
 void setup() {
 
@@ -185,12 +186,10 @@ SD_CARD_MISSING_RETRY:
   setupProcessLogicTimer(); // start the logic interrupt up last
 
   bitSet(playFlag, FLAG_PLAY_TUNE);
-  bitSet(playFlag, FLAG_REFRESH_DISPLAY);
-      
+  bitSet(playFlag, FLAG_REFRESH_DISPLAY);     
 }
 
 void loop() {
-
 
   if  (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
 
@@ -201,7 +200,8 @@ void loop() {
 //80
     int but = analogRead(NextButton_pin);
 
-    if (but > 4000)
+    // When running from battery power this measured voltage can sag at little 
+    if (but > 4000-400)  // generous value allows for battery power
       int g;
     else if (but > 3400-200)
       bitSet(playFlag,  FLAG_BACK_TUNE );
@@ -294,7 +294,7 @@ void loop() {
     displayVuMeterBottomPar(volumeChannelC);
 
     oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
-    oled.print(but) ;//fileSize / 1024);
+    oled.print(fileSize / 1024);
     oled.print("K ");
 
 
@@ -339,8 +339,6 @@ void setAYMode(AYMode mode) {
 // Amplitude Control             R8 to R10       Select "fixed" or "envelope-variable" amplitudes
 // Envelope Generator Control    R11 to R13      Program envelope period and select envelope pattern
 //-------------------------------------------------------------------------------------------------
-// Send latching data via 74HC595 to AY chip + Update VU meter
-// (74HC595 used as limited amount of pins available on a Arduino pro mini)
 // NOTE: *** Used by interrupt, keep code lightweight ***
 void writeAY( byte port , byte ctrl ) {
   if (port < PSG_REG_TOTAL) {
@@ -502,11 +500,10 @@ void setupPins() {
 // Timer1: 16 bits; Use by Servo, VirtualWire and TimerOne library
 // Timer2: 8 bits; Used by the tone() function
 
+// internal counter to slow things down (
+volatile static byte ScaleCounter = 0;
 
 ISR(TIMER2_COMPA_vect) {
-
-  // internal counter to slow things down (
-  volatile static byte ScaleCounter = 0;
 
   // Sample AY channels A,B and C
   audioAsum += analogRead(AY_AUDIO_A);
@@ -537,18 +534,19 @@ ISR(TIMER2_COMPA_vect) {
 }
 
 
-//Each Timer/Counter has two output compare pins.
-//Timer/Counter 0 OC0A and OC0B pins are called PWM pins 6 and 5 respectively.
-//Timer/Counter 1 OC1A and OC1B pins are called PWM pins 9 and 10 respectively.
-//Timer/counter 2 OC2A and OC2B pins are called PWM pins 11 and 3 respectively.
 
 
-// The AY38910 clock pin
-// The ZX Spectrum's 128K's AY soundchip is fed with a 1.7734MHz clock  (speccy Z80 CPU 3.5469/2=1.77345)
+// Generate pulse for the AY38910 clock pin
 void setupClockForAYChip() {
   TCCR1A = bit(COM1A0);
   TCCR1B = bit(WGM12) | bit(CS10);
+  // OCR1A NOTES:  0=8.00MHz, 1=4.00MHz, 2=2.67MHz,  3=2.00MHz
   OCR1A = 3;   // set a 2MHz frequence
+
+  //Each Timer/Counter has two output compare pins.
+  //Timer/Counter 0 OC0A and OC0B pins are called PWM pins 6 and 5 respectively.
+  //Timer/Counter 1 OC1A and OC1B pins are called PWM pins 9 and 10 respectively.
+  //Timer/counter 2 OC2A and OC2B pins are called PWM pins 11 and 3 respectively.
   pinMode(9, OUTPUT);
 }
 
@@ -607,16 +605,11 @@ int countPlayableFiles() {
 }
 
 void selectFile(int fileIndex) { // optimise
-
   if (file) {
     file.close();
   }
   if (root) {
     root.rewindDirectory();
-    for (int i=0; i<fileIndex-1; i++){
-      file= root.openNextFile();
-      file.close();
-    }
     int k=0;
     file = root.openNextFile();
     while (file) {
@@ -633,7 +626,7 @@ void selectFile(int fileIndex) { // optimise
       file.close(); // This isn't the file you're looking for, continue looking.
       file = root.openNextFile();
     }
-  }
+  } 
 }
 
 // Reads a single byte from the SD card into the cache (circular buffer)
@@ -683,7 +676,7 @@ void loop_TEST() {
   for (;;) {
 
     selectFile(fileIndex);
-    if (++fileIndex >= filesCount) {
+    if (++fileIndex >=  filesCount) {
       fileIndex = 0;
     }
     oled.setCursor(0, DISPLAY_ROW_FILENAME);
