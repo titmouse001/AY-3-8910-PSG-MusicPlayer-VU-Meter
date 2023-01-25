@@ -9,6 +9,7 @@ This iteration features a reduced hardware design and an enhanced user interface
 - OLED
 - SD Card Reader
 - Buttons (x4)
+- Audio Jack
 
 Arduino Nano is a small, powerful microcontroller board based on the ATmega328P chip. Similar to Arduino Uno, but smaller and more affordable. It has 14 digital I/O, 8 analog inputs, 16 MHz clock speed, USB connectivity and it's easy to program using the Arduino IDE. 
 The Nano is used to drive an AY-3 sound chip by connecting the necessary pins from the Nano to the AY-3 chip. The Nano controls the AY-3's sound output by sending control signals to the chip via digital pins. The OLED display and SD card reader are connected to the Nano using the I2C and SPI communication protocols, respectively. The 4 input buttons use a single pin on the Nano, with the use of resistors to provide different 'analog voltages' to the Nano when the buttons are pressed allowing different actions.
