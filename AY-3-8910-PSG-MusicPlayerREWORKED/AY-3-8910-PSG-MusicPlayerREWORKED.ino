@@ -373,43 +373,6 @@ inline bool readBuffer(byte& dat) {
   }
 }
 
-
-// PSG music format (body)
-// [0xff]              : End of interrupt (EOI) - waits for 20 ms
-// [0xfe],[byte]       : Multiple EOI, following byte provides how many times to wait 80ms.
-// [0xfd]              : End Of Music
-// [0x00..0x0f],[byte] : PSG register, following byte is accompanying data for this register
-//
-void processPSG() {
-  // Called by interrupt so keep this method as lightweight as possiblle
-  byte action, dat;
-  while (readBuffer(action)) {
-    switch (action) {
-      case END_OF_MUSIC_0xFD: bitSet(playFlag, FLAG_NEXT_TUNE);  return;
-      case END_OF_INTERRUPT_0xFF: return;
-    }
-    if (readBuffer(dat)) {
-      switch (action) {
-        case END_OF_INTERRUPT_MULTIPLE_0xFE:
-          if ((dat == 0xff) && (fileSize / 32 == 0)) {
-            // Some tunes have very long pauses at the end (caused by repeated sequences of "0xfe 0xff").
-            // For example "NewZealandStoryThe.psg" has a very long pause at the end, I'm guessing by design to handover to the ingame tune.
-            interruptCountSkip = 4; // 4 works ok on trouble tunes as a replacement pause
-          }
-          else {
-            interruptCountSkip = dat << 2; //   x4, to make each a 80 ms wait - part of formats standard
-          }
-          return; // get out - tune ask for a do nothing
-        default:  // 0x00 to 0xFC
-          writeAY(action, dat); // port & control regisiter
-          break;  // read more data - while loop
-      }
-    } else {
-      circularBufferReadIndex--;
-    }
-  }
-}
-
 // Q: Why top and bottom functions?
 // A: Two characters are joined to make a tall VU meter.
 inline void displayVuMeterTopPar(byte volume) {
@@ -533,9 +496,6 @@ ISR(TIMER2_COMPA_vect) {
   }
 }
 
-
-
-
 // Generate pulse for the AY38910 clock pin
 void setupClockForAYChip() {
   TCCR1A = bit(COM1A0);
@@ -567,7 +527,8 @@ void setupProcessLogicTimer() {
 
 
 
-// PSG HEADER DETAILS
+
+// *** PSG HEADER DETAILS ***
 //-----------------------------------------------------------------
 // Offset   Bytes Used   Description
 //-----------------------------------------------------------------
@@ -580,7 +541,49 @@ void setupProcessLogicTimer() {
 // Example of PSG File Header(16 bytes), header is followed by the start of the raw byte data
 // HEADER: 50 53 47 1A 00 00 00 00 00 00 00 00 00 00 00 00
 // DATA  : FF FF 00 F9 06 16 07 38 FF 00 69 06 17 FF 00 F9 ...
-//         ^^ ^^
+//
+// *** PSG PAYLOAD DETAILS ***
+// PSG commands - music format for byte data from file (payload/body/data)
+// - END_OF_INTERRUPT_0xFF
+//  [0xff]              : End of interrupt (EOI) - waits for 20 ms
+// - END_OF_INTERRUPT_MULTIPLE_0xFE
+//  [0xfe],[byte]       : Multiple EOI, following byte provides how many times to wait 80ms (value of "1" is x4 longer that FF).
+// - END_OF_INTERRUPT_MULTIPLE_0xFE
+//  [0xfd]              : End Of Music
+// - END_OF_MUSIC_0xFD
+//  [0x00..0x0f],[byte] : PSG register, following byte is accompanying data for this register
+//
+// note: register numbers ranging from 16 to 252 (0x10 to 0xfc) don't exist for the AY3-891x chips and are ignored
+
+void processPSG() {
+  // Called by interrupt so keep this method as lightweight as possiblle
+  byte action, dat;
+  while (readBuffer(action)) {
+    switch (action) {
+      case END_OF_MUSIC_0xFD: bitSet(playFlag, FLAG_NEXT_TUNE);  return;
+      case END_OF_INTERRUPT_0xFF: return;
+    }
+    if (readBuffer(dat)) {
+      switch (action) {
+        case END_OF_INTERRUPT_MULTIPLE_0xFE:
+          if ((dat == 0xff) && (fileSize / 32 == 0)) {
+            // Some tunes have very long pauses at the end (caused by repeated sequences of "0xfe 0xff").
+            // For example "NewZealandStoryThe.psg" has a very long pause at the end, I'm guessing by design to handover to the ingame tune.
+            interruptCountSkip = 4; // 4 works ok on trouble tunes as a replacement pause
+          }
+          else {
+            interruptCountSkip = dat << 2; //   x4, to make each a 80 ms wait - part of formats standard
+          }
+          return; // get out - tune ask for a do nothing
+        default:  // 0x00 to 0xFC
+          writeAY(action, dat); // port & control regisiter
+          break;  // read more data - while loop
+      }
+    } else {
+      circularBufferReadIndex--;
+    }
+  }
+}
 
 inline int advancePastHeader() {
   file.seek(16); // absolute position -  Skip header
@@ -660,7 +663,6 @@ void cacheSingleByteRead() {
   }
   ADVANCE_LOAD_BUFFER
 }
-
 
 // Reset AY chip to stop sound output
 // Reset line needs to go High->Low->High for AY38910/12
