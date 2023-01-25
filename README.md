@@ -27,6 +27,9 @@ Late 1970s to early 1980s: AY-3-891x chips are widely used in home computers, ga
 - Low cost alternative to Yamaha YM2149F
 - Widely used in home computers, game consoles and arcade games
 
+#### PCB 
+<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/Photo View_2023-01-25.svg" width="45%" />
+
 #### Breadboard Prototype (top view)
 <img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/BreadboardPrototypePic1.png" width="45%" />
 
