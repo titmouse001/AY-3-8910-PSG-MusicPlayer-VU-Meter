@@ -565,23 +565,36 @@ void setupProcessLogicTimer() {
   // https://onlinedocs.microchip.com/pr/GUID-93DE33AC-A8E1-4DD9-BDA3-C76C7CB80969-en-US-2/index.html?GUID-669CCBF6-D4FD-4E1D-AF92-62E9914559AA
 }
 
-// Skip header information
-// Example of Header(16 bytes) followed by the start of the raw byte data
+
+
+// PSG HEADER DETAILS
+//-----------------------------------------------------------------
+// Offset   Bytes Used   Description
+//-----------------------------------------------------------------
+// [0]      3            Identifier test = "PSG"
+// [3]      1            "end-of-text" marker (1Ah)
+// [4]      1            Version number
+// [5]      1            Playback frequency (for versions 10+)
+// [6]      10           Unknown
+
+// Example of PSG File Header(16 bytes), header is followed by the start of the raw byte data
 // HEADER: 50 53 47 1A 00 00 00 00 00 00 00 00 00 00 00 00
 // DATA  : FF FF 00 F9 06 16 07 38 FF 00 69 06 17 FF 00 F9 ...
 //         ^^ ^^
+
 inline int advancePastHeader() {
-  file.seek(16); // absolute position
+  file.seek(16); // absolute position -  Skip header
   return 16;
 }
 
-// Here we are checking for the "PSG" file header, byte by byte.
+// Here we are checking for the "PSG" file's header, byte by byte to help limit memory usage.
 // note: if found, global file will have advanced 3 bytes
 bool isFilePSG() {
   if (file) {
     if (!file.isDirectory()) {
       // Doing every little bit to save some dynamic memory.
-      // Could put "PSG" in program mem, but that would still require a counter eating away at the stack (yes one byte but I'm very low on stack/memory)
+      // Could put "PSG" in program mem, but that would still require 
+      // a counter eating away at the stack (yes one byte but I'm very low on stack/memory)
       return (file.available() && file.read() == 'P' && file.available() &&  file.read() == 'S' && file.available() && file.read() == 'G');
     }
   }
