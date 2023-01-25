@@ -11,7 +11,7 @@ This iteration features a reduced hardware design and an enhanced user interface
 - Buttons (x4)
 - Audio Jack
 
-Arduino Nano is a small, powerful microcontroller board based on the ATmega328P chip. Similar to Arduino Uno, but smaller and more affordable. It has 14 digital I/O, 8 analog inputs, 16 MHz clock speed, USB connectivity and it's easy to program using the Arduino IDE. 
+The Arduino Nano is a small, powerful microcontroller board based on the ATmega328P chip. Similar to Arduino Uno, but smaller and more affordable. It has 14 digital I/O, 8 analog inputs, 16 MHz clock speed, USB connectivity and it's easy to program using the Arduino IDE. 
 The Nano is used to drive an AY-3 sound chip by connecting the necessary pins from the Nano to the AY-3 chip. The Nano controls the AY-3's sound output by sending control signals to the chip via digital pins. The OLED display and SD card reader are connected to the Nano using the I2C and SPI communication protocols, respectively. The 4 input buttons use a single pin on the Nano, with the use of resistors to provide different 'analog voltages' to the Nano when the buttons are pressed allowing different actions.
 
 An OLED 32x128 for Arduino is a type of OLED (organic light-emitting diode) display that can be used with an Arduino microcontroller board. The display has a resolution of 32x128 pixels, which means it can display 32 columns of 128 rows. OLED displays are known for their high contrast, fast response time and wide viewing angles, they are also energy efficient as they don't require a backlight.
@@ -31,8 +31,8 @@ Late 1970s to early 1980s: AY-3-891x chips are widely used in home computers, ga
 - Low cost alternative to Yamaha YM2149F
 - Widely used in home computers, game consoles and arcade games
 
-## Breadboard Prototype - top view
-![OLED](/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/BreadboardPrototypePic1.png)  
+#### Breadboard Prototype (top view)
+<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/BreadboardPrototypePic1.png" width="45%" />
 
-## Breadboard Prototype - side view
-![OLED](/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/BreadboardPrototypePic2.png) 
+#### Breadboard Prototype (side view)
+<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/BreadboardPrototypePic2.png" width="45%" />
