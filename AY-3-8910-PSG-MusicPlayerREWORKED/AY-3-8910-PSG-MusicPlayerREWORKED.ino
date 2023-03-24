@@ -8,6 +8,31 @@
 //TODO ... [DONE] REWORK HARDWARE - lose chip for Serial to Parallel Shifting
 //TODO ... [DONE] lose fat.h and use SD.h - changeover was easier than I was expecting
 
+
+
+// "logic green nano"  compile using these settings:  board='LGT8F328' | clock=16Mz | variant=328P-LQFP48 mini-EVB
+// Only have Arduino IDE 2.0 with this installed
+
+
+// Arduino (Nano) Pins used:
+// PINS:
+// D0 to D7 ->  AY-3-8910 data pins  DA0 to DA7
+// D8       -> AY38910 BC1
+// D9       -> AY38910 CLOCK
+// D10      -> SD card CS (chip select)
+// D11      -> SD card MOSI
+// D12      -> SD card MISO
+// D13      -> SD card SCK
+// A0       -> AY38910 Audio A feedback line
+// A1       -> AY38910 Audio B feedback line
+// A2       -> AY38910 BDIR
+// A3       -> AY38910 RESET
+// A4       -> i2c bus 'SCL'  (single OLED on bus as '0x3C')
+// A5       -> i2c bus 'SDA'  (single OLED on bus as '0x3C') 
+// A6       -> AY38910 Audio C feedback line
+// A7       -> user input
+
+
 #include <SPI.h>
 #include <SD.h>  // with this lib, works on LGT8F328P ... needed to stop using fat.h and use SD.h
 #include "SSD1306Ascii.h"
@@ -16,7 +41,7 @@
 #include "pins.h"
 #include "AY3891xRegisters.h"
 
-#define VERSION ("1.2")
+#define VERSION ("2.3")
 
 
 // ********************************************************************
@@ -59,33 +84,35 @@ byte playBuf[BUFFER_SIZE];  // PICK ONE OF THE ABOVE BUFFER SIZES
 
 // AY modes for BDIR and BC1
 // NOTE: BC2 tied to +5v
-enum AYMode { INACTIVE, WRITE, LATCH_ADDRESS };
+enum AYMode { INACTIVE,READ, WRITE, LATCH_ADDRESS };
 // ----------------------------------
 // BDIR   BC2   BC1   PSG FUNCTION
 // ----+-----+-----+-----------------
 // 0      1      0    INACTIVE
-// 0      1      1    READ FROM PSG (not needed)
+// 0      1      1    READ FROM PSG
 // 1      1      0    WRITE TO PSG
 // 1      1      1    LATCH ADDRESS
 // ----------------------------------
 
 // Arduino Timer2  (8-bit timer)
 // Aiming for PWM of 50HZ, so interrupt triggers every 20ms if possible
-// 16000000Hz / 256  = 62500Hz
-// 62500Hz / duty 250 = 250 interrupts per second (so will scale by 5 in ISR code)
 //
 const byte DUTY_CYCLE_FOR_TIMER2 = 250;   // note: timer 2 has a 8 bit resolution
 //
-// History: for calculating the above values for prescaler and duty
+// History: for calculating the prescaler and duty
+//
 // Looking for any of these to be a multiple of 50HZ
 //1024: (16000000Hz / 1024 prescale) = 15625Hz
-//   1, 5, 25, 125 ... NO - nothing here fits my 50HZ target i.e. (125/50 = 2.5)
+//   gives factors 1, 5, 25, 125 ... NO - nothing here fits my 50HZ target i.e. (125/50 = 2.5)
 //256:  (16000000Hz / 256 prescale)  = 62500Hz
-//   1, 2, 4, 5, 10, 20, 25, 50, 100, 125, >>>> 250 WINNER <<<<<
+//   gives factors 1, 2, 4, 5, 10, 20, 25, 50, 100, 125, 250                        >>>> 250 WINNER <<<<<
 //128:  (16000000Hz / 128 prescale)  = 125000Hz
-//   1, 2, 4, 5, 8, 10, 20, 25, 40, 50, 100, 125, 200, 250 ... NOPE To fast
+//   gives factors 1, 2, 4, 5, 8, 10, 20, 25, 40, 50, 100, 125, 200, 250 ... NOPE To fast
 // 64:  (16000000Hz / 64 prescale)   = 250000Hz
-//   1, 2, 4, 5, 8, 10, 16, 20, 25, 40, 50, 80, 100, 125, 200, 250 - NOPE, yeah way to fast
+//   gives factors 1, 2, 4, 5, 8, 10, 16, 20, 25, 40, 50, 80, 100, 125, 200, 250 - NOPE, yeah way to fast
+//
+// 16000000Hz / 256  = 62500Hz
+// 62500Hz / duty 250 = 250 interrupts per second (so will scale by 5 in ISR code)
 //
 #define I2C_ADDRESS 0x3C  // 0x3C or 0x3D
 SSD1306AsciiAvrI2c oled;
@@ -119,6 +146,7 @@ byte volumeChannelA_Prev = 0;
 byte volumeChannelB_Prev = 0;
 byte volumeChannelC_Prev = 0;
 
+static byte  LastAYEnableRegisiterUsed=0 ;  // lets use set I/O ports without stumping over the AY's enabled sound bits
 
 // optimise
 volatile int next = 0;
@@ -149,21 +177,18 @@ volatile int audioMeanC = 0;
 volatile int audioMeanB = 0;
 
 
+
+
 // startup the display, audit files, fire-up timers at 1.75 MHz'ish, reset AY chip
 void setup() {
 
-  // Serial.begin(9600);   // this library eats 177 bytes, remove from release
-  //Serial.println(sizeof(SdFat));
-  // NOW USING TX, RX LINES .. SO USING SERIAL WILL MESS WITH OPERATIONS
-
+  // Serial.begin(9600);   // this library eats 177 bytes, dont forget to remove from release!!!
+  // Serial.println(sizeof(SdFat));
+  // NOTE: NOW USING TX, RX LINES .. using serial debug will mess things up, to use debug first disable PORTD writes in writeAY()
+  
+  setupOled();
   setupPins();
   resetAY();
-  setupOled();
-
-  // Sample AY audio lines (x3) for a good starting signal
-  baseAudioVoltage = analogRead(AY_AUDIO_A);
-  baseAudioVoltage = min(baseAudioVoltage, analogRead(AY_AUDIO_B));
-  baseAudioVoltage = min(baseAudioVoltage, analogRead(AY_AUDIO_C));
 
 SD_CARD_MISSING_RETRY:
   delay(1500);  // time to read the VERSION
@@ -187,30 +212,33 @@ SD_CARD_MISSING_RETRY:
 
   bitSet(playFlag, FLAG_PLAY_TUNE);
   bitSet(playFlag, FLAG_REFRESH_DISPLAY);     
+
+  oled.clear();
+
+  // Sample AY audio lines (x3) for a good starting signal
+  baseAudioVoltage = analogRead(AUDIO_FEEDBACK_A);
+  baseAudioVoltage = min(baseAudioVoltage, analogRead(AUDIO_FEEDBACK_B));
+  baseAudioVoltage = min(baseAudioVoltage, analogRead(AUDIO_FEEDBACK_C));
+
 }
 
 void loop() {
 
   if  (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
 
-//4000 nothing
-//3400
-//2000
-//1300
-//80
     int but = analogRead(NextButton_pin);
 
     // When running from battery power this measured voltage can sag at little 
     if (but > 4000-400)  // generous value allows for battery power
       int g;
     else if (but > 3400-200)
-      bitSet(playFlag,  FLAG_BACK_TUNE );
+      bitSet(playFlag,  FLAG_NEXT_TUNE );
     else if (but > 2000-200)
-      bitSet(playFlag, FLAG_NEXT_TUNE);
+      bitSet(playFlag, FLAG_BACK_TUNE);
     else if (but > 1300- 200)
-     int g;
+      bitSet(playFlag, FLAG_NEXT_TUNE); // temp
     else 
-     int g;
+      bitSet(playFlag, FLAG_BACK_TUNE); // temp
      
     if (count == 0 || but > 4000) {
       if (bitRead(playFlag, FLAG_NEXT_TUNE)) {
@@ -237,10 +265,9 @@ void loop() {
         selectFile(fileIndex);
         oled.setCursor(0, DISPLAY_ROW_FILENAME);
 
-        //Since the SD source code has:  char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
-        for (int i = 0; i < (12 - strlen(file.name())) ; i++) {
-          file.name()[12 - 1 - i] = ' '; //  HACK... this kind of all fine, don't panic
-        }
+        // NOTE: Since the SD source code has:  char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
+        const byte blankArea =  strlen(file.name());
+        memset( file.name() + blankArea, ' ', 12 - blankArea );  // clear last few charactes, alowing for shorter names
         oled.print((char*)file.name());  // becase of the above fudge, this will disaply all 12 characters - so will clear old shorter names
       }
 
@@ -248,6 +275,7 @@ void loop() {
       oled.print(fileIndex + 1);
       oled.print(F("/"));
       oled.print(filesCount);
+      oled.print(F(" "));
     }
 
     // find largest top end
@@ -283,23 +311,55 @@ void loop() {
       volumeChannelC--;
 
 
-
     oled.setCursor((128 / 2) - 6 - 6 - 6, DISPLAY_ROW_VU_METER_TOP);
-    displayVuMeterTopPar(volumeChannelA );
-    displayVuMeterTopPar(volumeChannelB );
-    displayVuMeterTopPar(volumeChannelC );
+    displayVuMeterTopPart(volumeChannelA);
+    displayVuMeterTopPart(volumeChannelB);
+    displayVuMeterTopPart(volumeChannelC);
     oled.setCursor((128 / 2) - 6 - 6 - 6, DISPLAY_ROW_VU_METER_BOTTOM);
-    displayVuMeterBottomPar(volumeChannelA );
-    displayVuMeterBottomPar(volumeChannelB );
-    displayVuMeterBottomPar(volumeChannelC);
+    displayVuMeterBottomPart(volumeChannelA);
+    displayVuMeterBottomPart(volumeChannelB);
+    displayVuMeterBottomPart(volumeChannelC);
 
     oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
     oled.print(fileSize / 1024);
     oled.print("K ");
 
-
     bitClear(playFlag, FLAG_REFRESH_DISPLAY);
     count -= (256 / 32); // letting byte wrap
+
+    //-----------
+
+    // New prototype UV code with two sets of x8 LEDS using AY I/O ports via a ULN2803 tranistor array
+    // WORKS!!!  For now just populating one side of PCB, other side is same but via port B
+
+    setAYMode(INACTIVE);
+    setAYMode(LATCH_ADDRESS);
+    PORTD = PSG_REG_ENABLE;
+    setAYMode(INACTIVE);
+    //setAYMode(INACTIVE);
+    PORTD = B01000000 | LastAYEnableRegisiterUsed;   //OIA - PORT A
+    setAYMode(WRITE);
+    //setAYMode(INACTIVE);
+    setAYMode(INACTIVE);
+    setAYMode(LATCH_ADDRESS);
+    PORTD = PSG_REG_IOA;
+    setAYMode(INACTIVE);
+
+    
+    //  Set bits based on the volume level (0 to 15)
+    const byte threshold = 2; // Pre-calculate 15 / (8 - 1)
+    byte bits = 0;
+    for (int i = 0; i < 8; i++) {
+      if (audioA > i * threshold) {
+        bits |= 1 << (7 - i);
+      }
+    }
+
+    PORTD = bits; //byte;
+    setAYMode(WRITE);
+    setAYMode(INACTIVE);
+    
+    //-----------
   }
   cacheSingleByteRead();  //cache more music data if needed
 }
@@ -314,51 +374,68 @@ void loop() {
 //    1  |  1  |  LATCH ADDRESS
 // ------+---------------------
 void setAYMode(AYMode mode) {
+
   switch (mode) {
     case INACTIVE:
-      digitalWrite(BDIR_pin, LOW);
-      digitalWrite(BC1_pin, LOW);
+      PORTB &= ~(1 << 0);  // BC1_pin   - order is important ?!?!
+      PORTC &= ~(1 << 2);  // BDIR_pin
+      //digitalWrite(BDIR_pin, LOW);
+      //digitalWrite(BC1_pin, LOW);
+      break;
+    case READ:
+      PORTB |= (1 << 0);
+      PORTC &= ~(1 << 2);
+      //digitalWrite(BDIR_pin, LOW);
+      //digitalWrite(BC1_pin, HIGH);
       break;
     case WRITE:
-      digitalWrite(BDIR_pin, HIGH);
-      digitalWrite(BC1_pin, LOW);
+      PORTB &= ~(1 << 0);
+      PORTC |= (1 << 2);
+      //digitalWrite(BDIR_pin, HIGH);
+      //digitalWrite(BC1_pin, LOW);
       break;
     case LATCH_ADDRESS:
-      digitalWrite(BDIR_pin, HIGH);
-      digitalWrite(BC1_pin, HIGH);
+      PORTB |= (1 << 0);
+      PORTC |= (1 << 2);
+      //digitalWrite(BDIR_pin, HIGH);
+      //digitalWrite(BC1_pin, HIGH);
       break;
   }
+
+  //https://garretlab.web.fc2.com/en/arduino/inside/hardware/arduino/avr/cores/arduino/Arduino.h/digitalPinToBitMask.html
 }
 
-//-------------------------------------------------------------------------------------------------
-//  Operation                    Registers       Function
-//--------------------------+---------------+------------------------------------------------------
-// Tone Generator Control        R0 to R5        Program tone periods
-// Noise Generator Control       R6              Program noise period
-// Mixer Control                 R7              Enable tone and/or noise on selected channels
-// Amplitude Control             R8 to R10       Select "fixed" or "envelope-variable" amplitudes
-// Envelope Generator Control    R11 to R13      Program envelope period and select envelope pattern
-//-------------------------------------------------------------------------------------------------
+
+
 // NOTE: *** Used by interrupt, keep code lightweight ***
-void writeAY( byte port , byte ctrl ) {
-  if (port < PSG_REG_TOTAL) {
+void writeAY(byte psg_register, byte data) {
+  if (psg_register < PSG_REG_TOTAL) {
+    //
+    // ADDRESS PSG REGISTER SEQUENCE (LATCH_ADDRESS)
+    // The “Latch Address.“. sequence is normally an integral part of the
+    // write or read sequences, but for simplicity is illustrated here as an
+    // individual sequence. Depending on the processor used the program
+    // sequence will normally require four principal microstates:
+    // (1) send NACT (inactive); (2) send INTAK (latch address);
+    // (3) put address on bus: (4) send NACT (inactive).
+    // [Note: within the timing constraints detailed in Section 7, steps (2) and (3) may be interchanged.]
+
+    setAYMode(INACTIVE);  // not really needed due to call order after setup
     setAYMode(LATCH_ADDRESS);
-    PORTD = port;
-    //   digitalWrite(DA3_pin, port & B00001000);
+    PORTD = psg_register;
     setAYMode(INACTIVE);
 
+    // WRITE DATA TO PSG SEQUENCE (WRITE)
+    // The “Write to PSG” sequence, which would normally follow immediately after an address sequence, requires four principal microstates:
+    // (1) send NACT (inactive); (2) put data on bus;
+    // (3) send DWS (write to PSG); (4) send NACT (inactive)
+    PORTD = data;
     setAYMode(WRITE);
-    PORTD = ctrl;
-    // digitalWrite(DA3_pin, control & B00001000);
     setAYMode(INACTIVE);
 
     //  switch (port) {
-    // case PSG_REG_LVL_A: volumeChannelA = analogRead(A6)/10;break; //= ctrl * VU_METER_INTERNAL_SCALE; break; // *2 for scaled maths (VU meter speed)
-    //  case PSG_REG_LVL_B: volumeChannelB = analogRead(A6)/10 ;break; //ctrl * VU_METER_INTERNAL_SCALE; break;
-    //  case PSG_REG_LVL_C: volumeChannelC= analogRead(A6)/10;break;  // = ctrl * VU_METER_INTERNAL_SCALE; break;
     //  case PSG_REG_ENV_SHAPE: if (ctrl == 255) return; // Envelope bugfix ???? NOT TESTED
     // }
-
   }
 }
 
@@ -375,31 +452,32 @@ inline bool readBuffer(byte& dat) {
 
 // Q: Why top and bottom functions?
 // A: Two characters are joined to make a tall VU meter.
-inline void displayVuMeterTopPar(byte volume) {
+inline void displayVuMeterTopPart(byte volume) {
   if (volume > 15)
     volume = 15;
 
   if (volume >= 8) {
     // Note: x8 characters have been redefined for the VU memter starting from '!'
-    oled.print( (char) ('!' + (((volume) & 0x07)) ) );
-    oled.print( (char) ('!' + (((volume) & 0x07)) ) );
-  }
-  else {
-    oled.print( F("  ") );  // nothing to show, clear.  (F() puts text into program mem)
+    oled.print((char)('!' + (((volume)&0x07))));
+    oled.print((char)('!' + (((volume)&0x07))));
+  } else {
+    oled.print(F("  "));  // nothing to show, clear.  (F() puts text into program mem)
   }
 }
-inline void displayVuMeterBottomPar(byte volume) {
+
+inline void displayVuMeterBottomPart(byte volume) {
   if (volume > 15)
     volume = 15;
 
   if (volume < 8) {
     // Note: x8 characters have been redefined for the VU memter starting from '!'
-    oled.print( (char) ('!' + (((volume) & 0x07)) ) );
-    oled.print( (char) ('!' + (((volume) & 0x07)) ) );
+    oled.print((char)('!' + (((volume)&0x07))));
+    oled.print((char)('!' + (((volume)&0x07))));
   }
-  else {
-    oled.print( F("(("));  // '(' is redefined as a solid bar for VU meter
-  }
+    else {
+      oled.print(F("(("));  // '(' is redefined as a solid bar for VU meter
+    }
+  
 }
 
 // Returns true when data is waiting and ready on the cache.
@@ -415,7 +493,7 @@ void setupOled() {
   // original Adafruit5x7 font with tweeks at start for VU meter
   oled.setFont( fudged_Adafruit5x7 );
   oled.clear();
-  oled.print(F("ver"));
+  oled.print(F("PSG Music Player\nfor the AY-3-8910\n\nver"));
   oled.println(F(VERSION));
 }
 
@@ -432,30 +510,23 @@ void setupPins() {
   DDRD = 0xff;
   PORTD = 0;
 
+  // pins for sound sampling to drive the VU Meter
   pinMode(A6, INPUT); // sound in
   pinMode(A1, INPUT); // sound in
   pinMode(A0, INPUT); // sound in
-
-
-  pinMode(AY_Clock_pin, OUTPUT);  // ay clock
-
-  pinMode(A2, OUTPUT);
-  // pinMode(A2, OUTPUT);  // AY data pin 3 is sent via pin 'A2'
-
   // Assign pins for the AY Chip
   pinMode(ResetAY_pin, OUTPUT);
   pinMode(BC1_pin, OUTPUT);
   pinMode(BDIR_pin, OUTPUT);
-
+  pinMode(AY_Clock_pin, OUTPUT);  // ay clock
+  ///////////////////////////pinMode(A2, OUTPUT);
   // Assign pins for the user input
   pinMode(NextButton_pin, INPUT);
-
   // SD card
   pinMode(CS_SDCARD_pin, OUTPUT);
   pinMode(MOSI_SDCARD_pin, INPUT);
   pinMode(MISO_SDCARD_pin, INPUT);
   pinMode(SCK_SDCARD_pin, INPUT);
-
 }
 
 // Three Arduino Timers
@@ -469,9 +540,9 @@ volatile static byte ScaleCounter = 0;
 ISR(TIMER2_COMPA_vect) {
 
   // Sample AY channels A,B and C
-  audioAsum += analogRead(AY_AUDIO_A);
-  audioBsum += analogRead(AY_AUDIO_B);
-  audioCsum += analogRead(AY_AUDIO_C);
+  audioAsum += analogRead(AUDIO_FEEDBACK_B);
+  audioBsum += analogRead(AUDIO_FEEDBACK_B);
+  audioCsum += analogRead(AUDIO_FEEDBACK_C);
 
   // 50 Hz, 250 interrupts per second / 50 = 5 steps per 20ms
   if (++ScaleCounter >= (DUTY_CYCLE_FOR_TIMER2 / 50) ) {
@@ -496,20 +567,26 @@ ISR(TIMER2_COMPA_vect) {
   }
 }
 
-// Generate pulse for the AY38910 clock pin
-void setupClockForAYChip() {
-  TCCR1A = bit(COM1A0);
-  TCCR1B = bit(WGM12) | bit(CS10);
-  // OCR1A NOTES:  0=8.00MHz, 1=4.00MHz, 2=2.67MHz,  3=2.00MHz
-  OCR1A = 3;   // set a 2MHz frequence
 
-  //Each Timer/Counter has two output compare pins.
-  //Timer/Counter 0 OC0A and OC0B pins are called PWM pins 6 and 5 respectively.
-  //Timer/Counter 1 OC1A and OC1B pins are called PWM pins 9 and 10 respectively.
-  //Timer/counter 2 OC2A and OC2B pins are called PWM pins 11 and 3 respectively.
-  pinMode(9, OUTPUT);
+// Arduino Nano Timer notes:
+// Each Timer/Counter has two output compare pins.
+//  - Timer/Counter 0 OC0A and OC0B pins are called PWM pins 6 and 5 respectively.
+//  - Timer/Counter 1 OC1A and OC1B pins are called PWM pins 9 and 10 respectively.
+//  - Timer/counter 2 OC2A and OC2B pins are called PWM pins 11 and 3 respectively.
+// Arduino libs provide 'F_CPU' as the clock frequency of the Arduino board you are compiling for.  
+#define MUSIC_FREQ 2000000
+// Configure Timer 1 to generate a square wave
+void setupClockForAYChip() {
+  TCCR1A = bit(COM1A0) ;// Set Compare Output Mode to toggle pin on compare match
+  TCCR1B = bit(WGM12) | bit(CS10); // Set Waveform Generation Mode to Fast PWM and set the prescaler to 1
+  // Calculate the value for the Output Compare Register A
+  OCR1A = ((F_CPU  / MUSIC_FREQ) / 2)  - 1;   // works out to be 3 for 16mhz arduino
+  pinMode(AY_Clock_pin, OUTPUT); // Pin to output the clock signal
 }
 
+// can we remove 2 if no prescaler ????
+
+#define INTERRUPT_FREQUENCY 50 
 
 // Setup 8-bit timer2 to trigger interrupt (see ISR function)
 void setupProcessLogicTimer() {
@@ -565,6 +642,12 @@ void processPSG() {
     }
     if (readBuffer(dat)) {
       switch (action) {
+        case PSG_REG_ENABLE:
+        //case PSG_REG_IOA:
+        //case PSG_REG_IOB:
+          writeAY(action, dat | B11000000);  // enable sound bits - Forcing I/O portA, portB (B11000000) to be enabled
+          LastAYEnableRegisiterUsed = dat;   // keep last used enabled bits so we, enable I/O later without losing sound bits
+        break;
         case END_OF_INTERRUPT_MULTIPLE_0xFE:
           if ((dat == 0xff) && (fileSize / 32 == 0)) {
             // Some tunes have very long pauses at the end (caused by repeated sequences of "0xfe 0xff").
@@ -574,7 +657,7 @@ void processPSG() {
           else {
             interruptCountSkip = dat << 2; //   x4, to make each a 80 ms wait - part of formats standard
           }
-          return; // get out - tune ask for a do nothing
+          return; // do nothing in this cycle
         default:  // 0x00 to 0xFC
           writeAY(action, dat); // port & control regisiter
           break;  // read more data - while loop
@@ -665,16 +748,47 @@ void cacheSingleByteRead() {
 }
 
 // Reset AY chip to stop sound output
-// Reset line needs to go High->Low->High for AY38910/12
-// Reset pulse width must be 500ns (min), this comes from the AY38910/12 datasheet.
 void resetAY() {
   setAYMode(INACTIVE);
-  digitalWrite(ResetAY_pin, HIGH); // best set this, for first time
+  // Reset line needs to go High->Low->High for AY38910/12
+  digitalWrite(ResetAY_pin, HIGH);  // just incase start high
   delay(1);
-  digitalWrite(ResetAY_pin, LOW);
+  digitalWrite(ResetAY_pin, LOW); // Reset pulse width must be min of 500ns
   delay(1);
   digitalWrite(ResetAY_pin, HIGH);
   setAYMode(INACTIVE);
+
+
+  // TEST CODE FOR SETTING  IO ON AY
+  // 0=INPUT , 1=OUTPUT  (OIA=Bit6, OIB=Bit7)
+// soon to become UV METER !!!!!!!!!!!W
+
+/*
+    setAYMode(INACTIVE);
+    setAYMode(LATCH_ADDRESS);
+    PORTD = PSG_REG_ENABLE;
+    setAYMode(INACTIVE);
+
+    setAYMode(INACTIVE);
+    PORTD = B01000000;   //OIA
+    setAYMode(WRITE);
+    setAYMode(INACTIVE);
+
+    setAYMode(INACTIVE);
+    setAYMode(LATCH_ADDRESS);
+    PORTD = PSG_REG_IOA;
+    setAYMode(INACTIVE);
+
+    setAYMode(INACTIVE);
+    PORTD = B10101010;
+    setAYMode(WRITE);
+    setAYMode(INACTIVE);
+*/
+    // TEST TO SEE IF THE ABOVE CAN WORK OVER TIME ?  DOES THE IO KEEP VALUES ...IT SHOULD?  
+    // ABOVE STATE SHOULD REMAIN WHILE MUSIC IS PLAYING.. I.E.  WHILE OTHER REGISTERS ARE BEING SET
+
+    // YEP THIS TEST CODE WORKS :)     CAN READ PINS WITH 0v,+5v WITH M/METER
+
 }
 
 
@@ -698,6 +812,14 @@ void loop_TEST() {
     oled.print((char*)file.name());
   }
 }
+
+
+
+// PORTB  (digital pin 8 to 13)
+// PORTC  (analog input pins)
+// PORTD  (digital pins 0 to 7)
+
+
 
 
 /*
@@ -726,5 +848,30 @@ void loop_TEST() {
 */
 
 
-// 730, 2040, 2800, 4200
-// 22 , 326, 515, 842
+/*
+3.6 Registers R16 and R17 function as intermediate data storage regisI/O Port Data ters between the PSG/CPU data bus (DA0--DA7) and the two I/O
+ports (IOA7-IOA0 and IOB7--1OB0). Both ports are available in the
+Store AY-3-8910; only I/O Port A is available in the AY-3-8912. Using
+registers R16 and R17 for the transfer of I/O data has no effect at all
+(Registers R16, R17) on sound generation.
+To output data from the CPU bus to a peripheral device connected to I/O Port A would require only the following steps:
+1. Latch address R7 (select Enable register)
+2. Write data to PSG (setting B6 of R7 to “1”)
+3. Latch address R16 (select IOA register)
+4. Write data to PSG (data to be output on I/O Port A)
+
+To input data from I/O Port A to the CPU bus would require the following:
+1. Latch address R7 (select Enable register)
+2. Write data to PSG (setting B6 to R7 to “0”)
+3. Latch address R16 (select IOA register)
+4. Read data from PSG (data from I/O Port A)
+Note that once loaded with data in the output mode, the data will
+remain on the I/O port(s) until changed either by loading different
+data, by applying a reset (grounding the Reset pin), or by switching to
+the input mode.
+Note also that when in the input mode, the contents of registers R16
+and/or R17 will follow thesignals applied to the I/O port(s). However,
+transfer of this data to the CPU bus requires a “read” operation as
+described above.
+
+*/

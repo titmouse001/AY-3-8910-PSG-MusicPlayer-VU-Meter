@@ -2,7 +2,7 @@
 #define pins_h
 
 //------------------
-// pins A0 to A7
+// pins A0 to A7  (analog PORTC)
 #ifndef A0
 #define A0   (14)
 #define A1   (15)
@@ -14,7 +14,7 @@
 #define A7   (21)
 #endif
 //-----------------
-// pins D0 to D13
+// pins D0 to D13  (digital PORTD + digital PORTB)
 #ifndef D0
 #define D0   (0)
 #define D1   (1)
@@ -47,9 +47,9 @@ const int BC1_pin         = D8;   // AY38910 BC1
 const int AY_Clock_pin    = D9;   // AY38910 CLOCK
 const int BDIR_pin        = A2;   // AY38910 BDIR
 
-const int AY_AUDIO_A      = A0;   // AY38910 BDIR
-const int AY_AUDIO_B      = A1;   // AY38910 BDIR
-const int AY_AUDIO_C      = A6;   // AY38910 BDIR
+const int AUDIO_FEEDBACK_A      = A0;   // AY38910 Audio A feedback line
+const int AUDIO_FEEDBACK_B      = A1;   // AY38910 Audio B feedback line
+const int AUDIO_FEEDBACK_C      = A6;   // AY38910 Audio C feedback line
 
 const int CS_SDCARD_pin   = D10;  // SD card CS (chip select)
 const int MOSI_SDCARD_pin = D11;  // SD card MOSI
