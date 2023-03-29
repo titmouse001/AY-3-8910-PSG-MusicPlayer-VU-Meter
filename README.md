@@ -1,4 +1,4 @@
-## AY-3-8910-PSG-MusicPlayer-REWORKED
+## AY-3-8910-PSG-MusicPlayer-VU-Meter
 
 ### Music Player Release
 This iteration features a reduced hardware design and an enhanced user interface.
