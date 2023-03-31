@@ -28,6 +28,19 @@
 #include "pins.h"
 #include "AY3891xRegisters.h"
 
+extern void setupPins();
+extern void resetAY();
+extern void setupClockForAYChip();
+extern void setupOled();
+extern int countPlayableFiles();
+extern void setupProcessLogicTimer();
+extern void selectFile(byte index);
+extern void cacheSingleByteRead();
+extern void displayVuMeterTopPar(byte volume);
+extern void displayVuMeterBottomPar(int volume);
+extern bool isCacheReady();
+extern void setAYMode(AYMode mode);
+
 #define VERSION ("2.3")
 
 // ********************************************************************
@@ -61,28 +74,18 @@ byte playBuf[BUFFER_SIZE];  // PICK ONE OF THE ABOVE BUFFER SIZES
 #define ADVANCE_LOAD_BUFFER  circularBufferLoadIndex++; if (circularBufferLoadIndex>=BUFFER_SIZE) {circularBufferLoadIndex=0;}
 #endif
 
-#define RESET_LOADPLAY_BUFFER circularBufferLoadIndex = circularBufferReadIndex = 0;
+#define RESET_BUFFERS circularBufferLoadIndex = circularBufferReadIndex = 0;
 
 // PSG commands - Incoming byte data from file
 #define  END_OF_INTERRUPT_0xFF            (0xff)
 #define  END_OF_INTERRUPT_MULTIPLE_0xFE   (0xfe)
 #define  END_OF_MUSIC_0xFD                (0xfd)
 
-// AY modes for BDIR and BC1
-// NOTE: BC2 tied to +5v
-enum AYMode { INACTIVE,READ, WRITE, LATCH_ADDRESS };
-// ----------------------------------
-// BDIR   BC2   BC1   PSG FUNCTION
-// ----+-----+-----+-----------------
-// 0      1      0    INACTIVE
-// 0      1      1    READ FROM PSG
-// 1      1      0    WRITE TO PSG
-// 1      1      1    LATCH ADDRESS
-// ----------------------------------
 
 // Arduino Timer2  (8-bit timer)
 // Aiming for PWM of 50HZ, so interrupt triggers every 20ms if possible
 //
+const byte INTERRUPT_FREQUENCY = 50;
 const byte DUTY_CYCLE_FOR_TIMER2 = 250;   // note: timer 2 has a 8 bit resolution
 //
 // History: for calculating the prescaler and duty
@@ -108,67 +111,53 @@ SSD1306AsciiAvrI2c oled;
 #define DISPLAY_ROW_BYTES_LEFT      (1)
 #define DISPLAY_ROW_VU_METER_TOP    (2)
 #define DISPLAY_ROW_VU_METER_BOTTOM (3)
-// Maths scale used for internals of VU meter
-//#define VU_METER_INTERNAL_SCALE (2)  // speed scale, must use 2^n values
-#define VU_METER_INTERNAL_SCALE (1)  // speed scale, must use 2^n values
 
-File root;  // 'File' struct takes 27 bytes
+File root;  // Note: 'File' struct takes 27 bytes
 File file;
 
-enum  { FLAG_NEXT_TUNE, FLAG_BACK_TUNE, FLAG_PLAY_TUNE, FLAG_BUTTON_REPEAT, FLAG_REFRESH_DISPLAY, FLAG_PLAYING }; // 8 or less items, using bits in byte as flags
+enum  { FLAG_NEXT_TUNE, FLAG_BACK_TUNE, FLAG_START_PLAYING_TUNE, FLAG_BUTTON_REPEAT, FLAG_REFRESH_DISPLAY, FLAG_PLAYING }; // 8 or less items, using bits in byte as flags
 volatile byte playFlag;
-
-int filesCount = 0;
+volatile int interruptCountSkip = 0;   // Don't play new sequences via interrupt when this is positive (do nothing for 20ms x interruptCountSkip)
+uint32_t fileRemainingBytesToRead = 0;         
+int filesCount = 0;           // tallys just psg files
 int fileIndex = 0;            // file indexes start from zero
-volatile int interruptCountSkip = 0;   // Don't play new sequences via interrupt when this is positive (do nothing for 20ms)
-uint32_t fileSize;
 
-// Define two variables to keep track of the circular buffer indices
-byte circularBufferLoadIndex;  // Optimied : this counter wraps back to zero by design (using 256 buffer option)
-byte circularBufferReadIndex;  // Optimied : this counter wraps back to zero by design
-byte volumeChannelA = 0;
-byte volumeChannelB = 0;
-byte volumeChannelC = 0;
-byte volumeChannelA_Prev = 0;
-byte volumeChannelB_Prev = 0;
-byte volumeChannelC_Prev = 0;
+// Circular buffer indices
+byte circularBufferLoadIndex;  // Byte Optimied : this counter wraps back to zero by design (using 256 buffer option)
+byte circularBufferReadIndex;  // Byte Optimied : this counter wraps back to zero by design
 
-static byte  LastAYEnableRegisiterUsed=0 ;  // lets use set I/O ports without stumping over the AY's enabled sound bits
+static byte  LastAYEnableRegisiterUsed=0 ;  // lets us set I/O ports without stamping over the AY's already enabled sound bits
 
 // optimise
 volatile int next = 0;
 int buttonwait = 0;
 byte count = 0; // =B10000000;
 
-extern void setupPins();
-extern void resetAY();
-extern  void setupClockForAYChip();
-extern void setupOled();
-extern int countPlayableFiles();
-extern void setupProcessLogicTimer();
-extern void selectFile(byte index);
-extern void cacheSingleByteRead();
-extern void displayVuMeterTopPar(byte volume);
-extern void displayVuMeterBottomPar(int volume);
-extern bool isCacheReady();
-extern void setAYMode(AYMode mode);
-
+// Audio
 int baseAudioVoltage = 0; // initialised once in setup for VU meter - lowest point posible
 int topAudioVoltage = 0; // for VU meter stepup - highest point posible
+volatile int audioAsum = 0;   // Sum accumulated at the faster ISR speed and averaged at display rate
+volatile int audioBsum = 0;   //   (reset to zero each display refresh)
+volatile int audioCsum = 0;   // 
+volatile int audioMeanA = 0;  // Holds average, made from the accumulated sums
+volatile int audioMeanC = 0;  //   (Updated each display refresh)
+volatile int audioMeanB = 0;  // 
 
-volatile int audioAsum = 0;
-volatile int audioBsum = 0;
-volatile int audioCsum = 0;
-volatile int audioMeanA = 0;
-volatile int audioMeanC = 0;
-volatile int audioMeanB = 0;
+// These volume varaibles hold 0 to 15 ranges
+byte volumeChannelA = 0;       // Update each frame with the latest average values
+byte volumeChannelB = 0;       //   (rescaling value into 0 to 15, based on baseAudioVoltage and topAudioVoltage)
+byte volumeChannelC = 0;       //   (decremented each frame allowing the VU meter to drop slowly rather than flick arround)
+byte volumeChannelA_Prev = 0;  // Keeps the last volume value used, so we know when to update with a fresh value and when to decrement
+byte volumeChannelB_Prev = 0;  //   (i.e. audioA/B/C >= volumeChannelA/B/C_Prev read new value otherwise decrement to drop VU meter a little eadch frame)
+byte volumeChannelC_Prev = 0;
 
 // Startup the display, audit files, fire-up timer for AY at 1.75Mhz(update: re-assigned pins so now 2Mhz, OC1A is not as flexable as OCR2A) , reset AY chip
 void setup() {
 
   // Serial.begin(9600);   // this library eats 177 bytes, dont forget to remove from release!!!
   // Serial.println(sizeof(SdFat));
-  // NOTE: NOW USING TX, RX LINES .. using serial debug will mess things up, to use debug first disable PORTD writes in writeAY()
+  // NOTE: NOW USING TX, RX LINES .. using serial debug will mess things up
+  // So to use debug first comment out PORTD writes, found in places like writeAY()
   
   setupOled();
   setupPins();
@@ -205,7 +194,7 @@ SD_CARD_MISSING_RETRY:
 
   setupProcessLogicTimer(); // start the logic interrupt up last
 
-  bitSet(playFlag, FLAG_PLAY_TUNE);
+  bitSet(playFlag, FLAG_START_PLAYING_TUNE);
   bitSet(playFlag, FLAG_REFRESH_DISPLAY);     
 
   oled.clear();
@@ -241,24 +230,23 @@ void loop() {
         if (++fileIndex >= filesCount) {
           fileIndex = 0;
         }
-        bitSet(playFlag, FLAG_PLAY_TUNE);
+        bitSet(playFlag, FLAG_START_PLAYING_TUNE);
       }
       if (bitRead(playFlag, FLAG_BACK_TUNE)) {
         bitClear(playFlag, FLAG_BACK_TUNE);
         if (--fileIndex < 0 ) {
           fileIndex = filesCount - 1;
         }
-        bitSet(playFlag, FLAG_PLAY_TUNE);
+        bitSet(playFlag, FLAG_START_PLAYING_TUNE);
       }
 
-      if (bitRead(playFlag, FLAG_PLAY_TUNE)) {
+      if (bitRead(playFlag, FLAG_START_PLAYING_TUNE)) {
    
         bitClear(playFlag, FLAG_PLAYING);
-
-        bitClear(playFlag, FLAG_PLAY_TUNE);
+        bitClear(playFlag, FLAG_START_PLAYING_TUNE);
         resetAY();
 
-        RESET_LOADPLAY_BUFFER
+        RESET_BUFFERS
 
         selectFile(fileIndex);
         oled.setCursor(0, DISPLAY_ROW_FILENAME);
@@ -294,7 +282,7 @@ void loop() {
     volumeChannelB_Prev = volumeChannelB;
     volumeChannelC_Prev = volumeChannelC;
 
-    // Note: volumeChannelX will never go negative as audioX can't
+    // Note: volumeChannelX will never go negative as audioA/B/C can't
     if (audioA >= volumeChannelA_Prev)
       volumeChannelA = audioA;  // Fresh audio detected, refresh UV meter
     else
@@ -321,7 +309,7 @@ void loop() {
     displayVuMeterBottomPart(volumeChannelC);
 
     oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
-    oled.print(fileSize / 1024);
+    oled.print(fileRemainingBytesToRead / 1024);
     oled.print(F("K "));
 
     bitClear(playFlag, FLAG_REFRESH_DISPLAY);
@@ -355,17 +343,9 @@ void loop() {
   cacheSingleByteRead();  //cache more music data if needed
 }
 
-// Generate two bus control signals for AY/PSG pins (BDIR and BC1)
-// ------+-----+---------------
-//  BDIR | BC1 |  PSG FUNCTION
-// ------+-----+---------------
-//    0  |  0  |  INACTIVE
-//    0  |  1  |  READ FROM PSG
-//    1  |  0  |  WRITE TO PSG
-//    1  |  1  |  LATCH ADDRESS
-// ------+---------------------
+// Set hardware (AY modes) for pins BDIR and BC1
 void setAYMode(AYMode mode) {
-
+  // OPTIMSED... however digitalWrite is doable
   switch (mode) {
     case INACTIVE:
       PORTB &= ~(1 << 0);  // BC1_pin   - order is important ?!?!
@@ -504,10 +484,10 @@ void setupPins() {
 // Timer1: 16 bits; Use by Servo, VirtualWire and TimerOne library
 // Timer2: 8 bits; Used by the tone() function
 
-// internal counter to slow things down (
-volatile static byte ScaleCounter = 0;
 
 ISR(TIMER2_COMPA_vect) {
+
+  volatile static byte ISR_Scaler = 0;  // used to slow frequency down to 50Hz
 
   if (!bitRead(playFlag, FLAG_PLAYING)) {
       return;
@@ -519,10 +499,10 @@ ISR(TIMER2_COMPA_vect) {
   audioCsum += analogRead(AUDIO_FEEDBACK_C);
 
   // 50 Hz, 250 interrupts per second / 50 = 5 steps per 20ms
-  if (++ScaleCounter >= (DUTY_CYCLE_FOR_TIMER2 / 50) ) {
-    audioMeanA = audioAsum / (DUTY_CYCLE_FOR_TIMER2 / 50);
-    audioMeanB = audioBsum / (DUTY_CYCLE_FOR_TIMER2 / 50);
-    audioMeanC = audioCsum / (DUTY_CYCLE_FOR_TIMER2 / 50);
+  if (++ISR_Scaler >= (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY) ) {
+    audioMeanA = audioAsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
+    audioMeanB = audioBsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
+    audioMeanC = audioCsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
     audioAsum = 0;
     audioBsum = 0;
     audioCsum = 0;
@@ -532,20 +512,20 @@ ISR(TIMER2_COMPA_vect) {
     } else {
       processPSG();
     }
-    ScaleCounter = 0;
+    ISR_Scaler = 0;
 
+    // 50Hz rate - also a good timing to refresh the display & UV meter
     bitSet(playFlag, FLAG_REFRESH_DISPLAY);
   }
 }
 
-
 // Arduino Nano Timer notes:
-// Each Timer/Counter has two output compare pins.
+// Each Timer/Counter has two output compare pins. (We are using OCR1A)
 //  - Timer/Counter 0 OC0A and OC0B pins are called PWM pins 6 and 5 respectively.
 //  - Timer/Counter 1 OC1A and OC1B pins are called PWM pins 9 and 10 respectively.
 //  - Timer/counter 2 OC2A and OC2B pins are called PWM pins 11 and 3 respectively.
 // Arduino libs provide 'F_CPU' as the clock frequency of the Arduino board you are compiling for.  
-#define MUSIC_FREQ 2000000
+#define MUSIC_FREQ 2000000  // value needs to be in Hz
 // Configure Timer 1 to generate a square wave
 void setupClockForAYChip() {
   TCCR1A = bit(COM1A0) ;// Set Compare Output Mode to toggle pin on compare match
@@ -554,10 +534,6 @@ void setupClockForAYChip() {
   OCR1A = ((F_CPU  / MUSIC_FREQ) / 2)  - 1;   // =3 for 16mhz arduino
   pinMode(AY_Clock_pin, OUTPUT); // Pin to output the clock signal
 }
-
-// can we remove 2 if no prescaler ????
-
-#define INTERRUPT_FREQUENCY 50 
 
 // Setup 8-bit timer2 to trigger interrupt (see ISR function)
 void setupProcessLogicTimer() {
@@ -572,36 +548,6 @@ void setupProcessLogicTimer() {
   sei();                            // enable interrupts
   // https://onlinedocs.microchip.com/pr/GUID-93DE33AC-A8E1-4DD9-BDA3-C76C7CB80969-en-US-2/index.html?GUID-669CCBF6-D4FD-4E1D-AF92-62E9914559AA
 }
-
-
-
-
-// *** PSG HEADER DETAILS ***
-//-----------------------------------------------------------------
-// Offset   Bytes Used   Description
-//-----------------------------------------------------------------
-// [0]      3            Identifier test = "PSG"
-// [3]      1            "end-of-text" marker (1Ah)
-// [4]      1            Version number
-// [5]      1            Playback frequency (for versions 10+)
-// [6]      10           Unknown
-
-// Example of PSG File Header(16 bytes), header is followed by the start of the raw byte data
-// HEADER: 50 53 47 1A 00 00 00 00 00 00 00 00 00 00 00 00
-// DATA  : FF FF 00 F9 06 16 07 38 FF 00 69 06 17 FF 00 F9 ...
-//
-// *** PSG PAYLOAD DETAILS ***
-// PSG commands - music format for byte data from file (payload/body/data)
-// - END_OF_INTERRUPT_0xFF
-//  [0xff]              : End of interrupt (EOI) - waits for 20 ms
-// - END_OF_INTERRUPT_MULTIPLE_0xFE
-//  [0xfe],[byte]       : Multiple EOI, following byte provides how many times to wait 80ms (value of "1" is x4 longer that FF).
-// - END_OF_INTERRUPT_MULTIPLE_0xFE
-//  [0xfd]              : End Of Music
-// - END_OF_MUSIC_0xFD
-//  [0x00..0x0f],[byte] : PSG register, following byte is accompanying data for this register
-//
-// note: register numbers ranging from 16 to 252 (0x10 to 0xfc) don't exist for the AY3-891x chips and are ignored
 
 void processPSG() {
   // Called by interrupt so keep this method as lightweight as possiblle
@@ -620,10 +566,10 @@ void processPSG() {
           LastAYEnableRegisiterUsed = dat;   // keep last used enabled bits so we, enable I/O later without losing sound bits
           break;
         case END_OF_INTERRUPT_MULTIPLE_0xFE:
-          if ((dat == 0xff) && (fileSize / 32 == 0)) {
+          if ((dat == 0xff) && (fileRemainingBytesToRead / 32 == 0)) {
             // Some tunes have very long pauses at the end (caused by repeated sequences of "0xfe 0xff").
             // For example "NewZealandStoryThe.psg" has a very long pause at the end, I'm guessing by design to handover to the ingame tune.
-            interruptCountSkip = 4;  // 4 works ok on trouble tunes as a replacement pause
+            interruptCountSkip = 4;  // new replacement pause
           } else {
             interruptCountSkip = dat << 2;  //   x4, to make each a 80 ms wait - part of formats standard
           }
@@ -649,9 +595,9 @@ void resetAY() {
   digitalWrite(ResetAY_pin, HIGH);
   setAYMode(INACTIVE);
 
-  writeAY(PSG_REG_ENABLE, B11000000 );
-  writeAY(PSG_REG_IOA, 0);
-  writeAY(PSG_REG_IOB, 0);
+  writeAY(PSG_REG_ENABLE, B11000000 );  // enable I/O
+  writeAY(PSG_REG_IOA, 0);              // make sure VU meter is off
+  writeAY(PSG_REG_IOB, 0);              // (nothing set so no LED's will come on yet)
 }
 
 // ------------------------------
@@ -717,9 +663,9 @@ void selectFile(int fileIndex) { // optimise
     while (file) {
       if (isFilePSG()) {
         if (k == fileIndex) {
-          fileSize = file.size();
-          if (fileSize > 16) { // check we have a body, 16 PSG header
-            fileSize -= advancePastHeader();
+          fileRemainingBytesToRead = file.size();
+          if (fileRemainingBytesToRead > 16) { // check we have a body, 16 PSG header
+            fileRemainingBytesToRead -= advancePastHeader();
             break;  // Found it - leave this file open, cache takes over from here on and process it.
           }
         }
@@ -742,9 +688,9 @@ void cacheSingleByteRead() {
   if (circularBufferLoadIndex == (BUFFER_SIZE - 1) && circularBufferReadIndex == 0) 
     return;
 
-  if (fileSize >= 1) {   // Read a byte from the file and store it in the circular buffer
+  if (fileRemainingBytesToRead >= 1) {   // Read a byte from the file and store it in the circular buffer
     playBuf[circularBufferLoadIndex] = file.read();
-    fileSize--;
+    fileRemainingBytesToRead--;
   }
   else {
     // There is no more data in the file, so write the end-of-music byte instead
@@ -755,27 +701,48 @@ void cacheSingleByteRead() {
 }
 
 
+/* 
+=======================================================================
+                      USEFUL NOTES SECTION
+=======================================================================
 
+Here are some playback rates for various architectures:-
+  - Amstrad CPC: 1 MHz
+  - Atari ST: 2 MHz
+  - MSX: 1.7897725 MHz
+  - Oric-1: 1 MHz
+  - ZX Spectrum: 1.7734 MHz
 
-// void loop_TEST() {
+=======================================================================
 
-//   // Test the file handling
-//   // make sure everthing works and closes files and stuff
-//   //
-//   // leave running - if it does not lock up then the logic is "probably" ok.
-//   //
-//   for (;;) {
+=== PSG FILE - HEADER & DATA DETAILS ===
+-----------------------------------------------------------------
+Offset   Bytes Used   Description
+-----------------------------------------------------------------
+[0]      3            Identifier test = "PSG"
+[3]      1            "end-of-text" marker (1Ah)
+[4]      1            Version number
+[5]      1            Playback frequency (for versions 10+)
+[6]      10           Unknown
+-----------------------------------------------------------------
 
-//     selectFile(fileIndex);
-//     if (++fileIndex >=  filesCount) {
-//       fileIndex = 0;
-//     }
-//     oled.setCursor(0, DISPLAY_ROW_FILENAME);
-//     oled.print((char*)file.name());
-//   }
-// }
+Example of PSG File Header(16 bytes), header is followed by the start of the raw byte data
+HEADER: 50 53 47 1A 00 00 00 00 00 00 00 00 00 00 00 00
+DATA  : FF FF 00 F9 06 16 07 38 FF 00 69 06 17 FF 00 F9 ...
 
-/*
+=== PSG PAYLOAD/DATA DETAILS ===
+PSG commands - music format for byte data from file (payload/body/data)
+- END_OF_INTERRUPT_0xFF           [0xff]              : End of interrupt (EOI) - waits for 20 ms
+- END_OF_INTERRUPT_MULTIPLE_0xFE  [0xfe],[byte]       : Multiple EOI, following byte provides how many times to wait 80ms (value of "1" is x4 longer that FF).
+- END_OF_INTERRUPT_MULTIPLE_0xFE  [0xfd]              : End Of Music
+- END_OF_MUSIC_0xFD               [0x00..0x0f],[byte] : PSG register, following byte is accompanying data for this register
+
+note: Value register numbers range from 16 to 252 
+      (Ranges 0x10 to 0xfc don't exist for the AY3-891x chips and should be ignored)
+
+=======================================================================
+
+# Reference taken from the "AY-3-8910-datasheet" - section 3.6
 3.6 Registers R16 and R17 function as intermediate data storage regisI/O Port Data ters between the PSG/CPU data bus (DA0--DA7) and the two I/O
 ports (IOA7-IOA0 and IOB7--1OB0). Both ports are available in the
 Store AY-3-8910; only I/O Port A is available in the AY-3-8912. Using
@@ -800,11 +767,5 @@ Note also that when in the input mode, the contents of registers R16
 and/or R17 will follow thesignals applied to the I/O port(s). However,
 transfer of this data to the CPU bus requires a “read” operation as
 described above.
-
-Amstrad CPC: 1 MHz
-Atari ST: 2 MHz
-MSX: 1.7897725 MHz
-Oric-1: 1 MHz
-ZX Spectrum: 1.7734 MHz
 
 */

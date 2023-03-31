@@ -22,6 +22,18 @@ enum {
   PSG_REG_TOTAL
 };
 
+// AY modes for BDIR and BC1 (BC2 not needed and must be set to '1', i.e. in hardware BC2 is just tied to +5v)
+// Generate two bus control signals for AY(PSG) pins (BDIR and BC1)
+enum AYMode { INACTIVE,READ, WRITE, LATCH_ADDRESS };
+// ------+-----+---------------
+//  BDIR | BC1 |  PSG FUNCTION
+// ------+-----+---------------
+//    0  |  0  |  INACTIVE
+//    0  |  1  |  READ FROM PSG
+//    1  |  0  |  WRITE TO PSG
+//    1  |  1  |  LATCH ADDRESS
+// ------+---------------------
+
 //-------------------------------------------------------------------------------------------------
 //  Operation                    Registers       Function
 //--------------------------+---------------+------------------------------------------------------
