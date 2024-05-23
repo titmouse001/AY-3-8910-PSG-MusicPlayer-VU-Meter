@@ -25,7 +25,6 @@
 // PORTC  (analog input pins)
 // PORTD  (digital pins 0 to 7)
 
-
 #include <SPI.h>
 #include <SD.h>  // with this lib, works on LGT8F328P ... needed to stop using fat.h and use SD.h
 #include "SSD1306AsciiAvrI2c.h"  // OLED display  ... USE: #define INCLUDE_SCROLLING 0
@@ -626,7 +625,7 @@ void processPSG() {
           //case PSG_REG_IOA:
           //case PSG_REG_IOB:
           writeAY(action, dat | B11000000);  // enable sound bits - Forcing I/O portA, portB (B11000000) to be enabled
-          LastAYEnableRegisiterUsed = dat;   // keep last used enabled bits, we can enable I/O later without losing sound bits
+          LastAYEnableRegisiterUsed = dat;   // keep last used enabled bits, do we can enable I/O later without losing sound bits
           break;
         case END_OF_INTERRUPT_MULTIPLE_0xFE:
           if ((dat == 0xff) && (fileRemainingBytesToRead / 32 == 0)) {
