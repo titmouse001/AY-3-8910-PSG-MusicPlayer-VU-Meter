@@ -9,6 +9,10 @@
 //TODO ... [DONE] lose fat.h and use SD.h - changeover was easier than I was expecting
 
 
+// NOTE: platform.txt (C:\Users\Admin\AppData\Local\Arduino15\packages\arduino\hardware\avr\1.8.6)
+// Update can sometimes change the compiler settings to '-Ofast'
+// This sketch is using Something like #optimise='-Os' or '-O2' to allow code to fit into a ATmega168 pro mini
+
 //https://www.pcbway.com/project/shareproject/AY_3_8910_Sound_Generator_Arduino_Nano_Controlled_54bbb339.html
 //https://github.com/Andy4495/AY3891x
 // tips on converting AY to flat files
@@ -54,11 +58,11 @@ extern void setAYMode(AYMode mode);
 //
 // OPTION 1:   - ATmega328(2K) allows optimised counters
 // ========
-//#define BUFFER_SIZE (256)
+#define BUFFER_SIZE (256)
 //
 // OPTION 2:   - ATmega168(1K) code uses a smaller buffer
 // ========
-#define BUFFER_SIZE (64)
+//#define BUFFER_SIZE (64)
 //
 // ********************************************************************
 
@@ -120,12 +124,17 @@ SSD1306AsciiAvrI2c oled;
 File root;  // Note: 'File' struct takes 27 bytes
 File file;
 
-enum  { FLAG_NEXT_TUNE, FLAG_BACK_TUNE, FLAG_START_PLAYING_TUNE, FLAG_BUTTON_REPEAT, FLAG_REFRESH_DISPLAY, FLAG_PLAYING }; // 8 or less items, using bits in byte as flags
+enum  { FLAG_NEXT_TUNE, FLAG_BACK_TUNE, FLAG_PAUSE_TUNE, FLAG_START_PLAYING_TUNE, FLAG_BUTTON_REPEAT, FLAG_REFRESH_DISPLAY, FLAG_PLAYING }; // 8 or less items, using bits in byte as flags
 volatile byte playFlag;
 volatile int interruptCountSkip = 0;   // Don't play new sequences via interrupt when this is positive (do nothing for 20ms x interruptCountSkip)
 uint32_t fileRemainingBytesToRead = 0;         
 int filesCount = 0;           // tallys just psg files
 int fileIndex = 0;            // file indexes start from zero
+
+
+volatile byte la;
+volatile byte lb;
+volatile byte lc;
 
 //bool swapAudioABC = false;
 //int  CounterswapAudioABC = 0;
@@ -174,7 +183,7 @@ void setup() {
   resetAY();
 
 SD_CARD_MISSING_RETRY:
-  delay(1500);  // time to read the VERSION
+  delay(2500);  // time to read the VERSION
 
   if (SD.begin(CS_SDCARD_pin)) {
     root = SD.open("/");
@@ -207,10 +216,12 @@ SD_CARD_MISSING_RETRY:
 
   oled.clear();
 
-  // Sample AY audio lines (x3) for a good starting signal
-  baseAudioVoltage = analogRead(AUDIO_FEEDBACK_A);
-  baseAudioVoltage = min(baseAudioVoltage, analogRead(AUDIO_FEEDBACK_B));
-  baseAudioVoltage = min(baseAudioVoltage, analogRead(AUDIO_FEEDBACK_C));
+  // Sample AY audio lines (x3) for a baseline starting signal
+//  baseAudioVoltage = analogRead(AUDIO_FEEDBACK_A);
+//  baseAudioVoltage = min(baseAudioVoltage, analogRead(AUDIO_FEEDBACK_B));
+//  baseAudioVoltage = min(baseAudioVoltage, analogRead(AUDIO_FEEDBACK_C));
+  baseAudioVoltage = min(min(analogRead(AUDIO_FEEDBACK_A), analogRead(AUDIO_FEEDBACK_B)), analogRead(AUDIO_FEEDBACK_C));
+
 
 }
 
@@ -218,7 +229,7 @@ void loop() {
 
 
 
-  if  (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
+  if  (bitRead(playFlag, FLAG_REFRESH_DISPLAY) ||  bitRead(playFlag,FLAG_PAUSE_TUNE)) {
 
  // CounterswapAudioABC ++;
  // if (CounterswapAudioABC>50*10) {
@@ -230,20 +241,44 @@ void loop() {
 
     int but = analogRead(NextButton_pin);
 
-    int hardwareLevel =  800;
-   //int hardwareLevel =  4000;
+    // vaules found from debugging button values are:- 20,325,511,845
+    // note: When running from battery power this measured voltage can sag a little
+  //  int hardwareLevel =  900;
 
 
-    // When running from battery power this measured voltage can sag at little
-     if (but <= hardwareLevel) {  // todo .. later on add +/- generous value for battery power
-       if (but > 40)
+     if (but <= 900) {  // todo .. later on add +/- generous value for battery power
+       if (but > 800) {
          bitSet(playFlag, FLAG_NEXT_TUNE);
-       else if (but > 20)
+       }
+       else if (but > 500) {
+  //       last_playFlag = playFlag;
+         bitSet(playFlag, FLAG_PAUSE_TUNE); 
+  //       playFlag = FLAG_PAUSE_TUNE;
+
+//  setAYMode(INACTIVE);
+  // Reset line needs to go High->Low->High for AY38910/12
+ // digitalWrite(ResetAY_pin, HIGH);  // just incase start high
+  // digitalWrite(ResetAY_pin, LOW); // Reset pulse width must be min of 500ns
+   //digitalWrite(ResetAY_pin, HIGH);
+  //setAYMode(INACTIVE);
+
+          writeAY(PSG_REG_AMPLITUDE_A,  0 );
+    writeAY(PSG_REG_AMPLITUDE_B,  0 );
+    writeAY(PSG_REG_AMPLITUDE_C,  0 );
+
+       }
+       else if (but > 300) {
+         bitClear(playFlag, FLAG_PAUSE_TUNE); 
+
+
+          writeAY(PSG_REG_AMPLITUDE_A,  la );
+    writeAY(PSG_REG_AMPLITUDE_B,  lb );
+    writeAY(PSG_REG_AMPLITUDE_C,  lc );
+//         playFlag = last_playFlag;  // unpause
+       }
+       else if (but > 20) {
          bitSet(playFlag, FLAG_BACK_TUNE);
-//       else if (but > 1300 - 200)
- //        bitSet(playFlag, FLAG_NEXT_TUNE);  // temp
-  //     else
-   //      bitSet(playFlag, FLAG_BACK_TUNE);  // temp
+       }
      }
 
     if (count == 0 || but > 4000) {
@@ -289,13 +324,15 @@ void loop() {
     }
 
     // find largest top end
-    topAudioVoltage = max(topAudioVoltage, audioMeanA);
-    topAudioVoltage = max(topAudioVoltage, audioMeanB);
-    topAudioVoltage = max(topAudioVoltage, audioMeanC);
+ //   topAudioVoltage = max(topAudioVoltage, audioMeanA);
+  //  topAudioVoltage = max(topAudioVoltage, audioMeanB);
+   // topAudioVoltage = max(topAudioVoltage, audioMeanC);
+    topAudioVoltage = max(max(topAudioVoltage, audioMeanA), max(audioMeanB, audioMeanC));
+
     // Allow audio to dip over time
     topAudioVoltage--;   // works in synergy with the above max lines
-    // Note: At this point audio data has been scaled to fit into a byte
-    // scale down incoming audio voltages (0 to 15)
+    // Note: The audio data has to be scaled to fit into a byte.
+    // We scale down incoming audio voltages to scale to display pixels (0 to 15)
     int audioA = map(audioMeanA, baseAudioVoltage, topAudioVoltage, 0, 15);
     int audioB = map(audioMeanB, baseAudioVoltage, topAudioVoltage, 0, 15);
     int audioC = map(audioMeanC, baseAudioVoltage, topAudioVoltage, 0, 15);
@@ -305,6 +342,7 @@ void loop() {
     volumeChannelC_Prev = volumeChannelC;
 
     // Note: volumeChannelX will never go negative as audioA/B/C can't
+/*
     if (audioA >= volumeChannelA_Prev)
       volumeChannelA = audioA;  // Fresh audio detected, refresh UV meter
     else
@@ -319,6 +357,10 @@ void loop() {
       volumeChannelC = audioC;
     else
       volumeChannelC--;
+*/
+    volumeChannelA = (audioA >= volumeChannelA_Prev) ? audioA : volumeChannelA - 1;
+    volumeChannelB = (audioB >= volumeChannelB_Prev) ? audioB : volumeChannelB - 1;
+    volumeChannelC = (audioC >= volumeChannelC_Prev) ? audioC : volumeChannelC - 1;
 
 
     oled.setCursor((128 / 2) - 6 - 6 - 6, DISPLAY_ROW_VU_METER_TOP);
@@ -344,30 +386,38 @@ void loop() {
     bitClear(playFlag, FLAG_REFRESH_DISPLAY);
     count -= (256 / 32); // letting byte wrap
 
-    //-----------
 
-    // Set bits based on the volume level (0 to 15)
-    const byte threshold = 2; // Pre-calculate 15 / (8 - 1)
-    byte bits = 0;
-    for (int i = 0; i < 8; i++) {
-      if ((audioA*2+(audioB))/3 > i * threshold) {
-        bits |= 1 << (7 - i);
-      }
-    }
+    // ====================================================================
+    // Send to AY I/O
+    // ====================================================================
 
     writeAY(PSG_REG_ENABLE, B11000000 | LastAYEnableRegisiterUsed );
-    writeAY(PSG_REG_IOA, bits);
 
-    bits = 0;
+    const byte threshold = 2;    // Equivalent to 15 / (8 - 1)
+    byte bits = 0;
+    byte avgAudio = (2 * audioA + audioB) / 3;
+
     for (int i = 0; i < 8; i++) {
-      if ((audioC*2+(audioB))/3 > i * threshold) {
-        bits |= 1 << (7 - i);
-      }
+        if (avgAudio > i * threshold) {
+            bits |= 1 << i;
+        }
     }
-   // writeAY(PSG_REG_ENABLE, B11000000 | LastAYEnableRegisiterUsed );
+ 
+    writeAY(PSG_REG_IOA, bits);
+  
+    bits = 0;
+    avgAudio = (2 * audioC + audioB) / 3;
+
+    for (int i = 0; i < 8; i++) {
+        if (avgAudio > i * threshold) {
+            bits |= 1 << i;
+        }
+    }
+
     writeAY(PSG_REG_IOB, bits);
 
-    //-----------
+    // ====================================================================
+  
   }
   cacheSingleByteRead();  //cache more music data if needed
 }
@@ -513,7 +563,7 @@ void setupOled() {
   // original Adafruit5x7 font with tweeks at start for VU meter
   oled.setFont( fudged_Adafruit5x7 );
   oled.clear();
-  oled.print(F("PSG Music Player\nfor the AY-3-8910\n\nver"));
+  oled.print(F("PSG Music Player\nusing the AY-3-8910\n\nver"));
   oled.println(F(VERSION));
 }
 
@@ -556,6 +606,7 @@ ISR(TIMER2_COMPA_vect) {
       return;
   }
    
+ if(!bitRead(playFlag, FLAG_PAUSE_TUNE)) {
   // Sample AY channels A,B and C
   audioAsum += analogRead(AUDIO_FEEDBACK_B);
   audioBsum += analogRead(AUDIO_FEEDBACK_B);
@@ -572,11 +623,11 @@ ISR(TIMER2_COMPA_vect) {
 
     if (interruptCountSkip > 0) {
       interruptCountSkip--;
-    } else {
-      processPSG();
-    }
+    } else {    
+        processPSG();
+     }
     ISR_Scaler = 0;
-
+  }
     // 50Hz rate - also a good timing to refresh the display & UV meter
     bitSet(playFlag, FLAG_REFRESH_DISPLAY);
   }
@@ -622,12 +673,14 @@ void processPSG() {
     }
     if (readBuffer(dat)) {
       switch (action) {
+
         case PSG_REG_ENABLE:
           //case PSG_REG_IOA:
           //case PSG_REG_IOB:
           writeAY(action, dat | B11000000);  // enable sound bits - Forcing I/O portA, portB (B11000000) to be enabled
           LastAYEnableRegisiterUsed = dat;   // keep last used enabled bits, we can enable I/O later without losing sound bits
           break;
+
         case END_OF_INTERRUPT_MULTIPLE_0xFE:
           if ((dat == 0xff) && (fileRemainingBytesToRead / 32 == 0)) {
             // Some tunes have very long pauses at the end (caused by repeated sequences of "0xfe 0xff").
@@ -637,6 +690,17 @@ void processPSG() {
             interruptCountSkip = dat << 2;  //   x4, to make each a 80 ms wait - part of formats standard
           }
           return;                // do nothing in this cycle
+
+        case PSG_REG_AMPLITUDE_A:
+          la = dat;
+          writeAY(action, dat);
+          break; 
+        case PSG_REG_AMPLITUDE_B:
+          lb = dat;
+          writeAY(action, dat); 
+          break;
+        case PSG_REG_AMPLITUDE_C:
+          lc = dat;
         default:                 // 0x00 to 0xFC
           writeAY(action, dat);  // port & control regisiter
           break;                 // read more data - while loop
@@ -649,6 +713,9 @@ void processPSG() {
 
 // Reset AY chip to stop sound output
 void resetAY() {
+  la = 0;
+  lb = 0;
+  lc = 0;
   setAYMode(INACTIVE);
   // Reset line needs to go High->Low->High for AY38910/12
   digitalWrite(ResetAY_pin, HIGH);  // just incase start high
