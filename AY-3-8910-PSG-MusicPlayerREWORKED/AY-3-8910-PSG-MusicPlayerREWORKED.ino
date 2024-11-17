@@ -51,7 +51,8 @@ extern bool isCacheReady();
 extern void setAYMode(AYMode mode);
 extern void setChannelVolumes(byte a, byte b, byte c);
 extern void SendVUMeterDataToAY_IO(byte audioA, byte audioB, byte audioC);
-extern void selectTune(byte playFlag);
+extern void selectTune(byte option);
+extern bool startTune();
 
 #define VERSION ("2.4")
 
@@ -61,7 +62,7 @@ extern void selectTune(byte playFlag);
 // ATmega168 (1K RAM): uses smaller 64-byte buffer to fit within memory
 //#define BUFFER_SIZE (64)
 
-byte playBuf[BUFFER_SIZE]; // Playback buffer, sized based on the selected buffer size option
+byte playBuf[BUFFER_SIZE];  // Playback buffer, sized based on the selected buffer size option
 
 // Control for circular buffer indexing, wraps to start when reaching buffer end
 #if (BUFFER_SIZE == 256)
@@ -121,24 +122,31 @@ SSD1306AsciiAvrI2c oled;
 // SD card root directory and file object
 File root;  // Note: 'File' struct "EATS UP 27 BYTES"
 File file;
+//File filePlaying;
+//File rootPlaying; 
 
 // Play flags for control states (e.g., start, pause, refresh)
-// MUST USE 8 or less items as bits sotred as byte
 enum { FLAG_NEXT_TUNE,
        FLAG_BACK_TUNE,
        FLAG_PAUSE_TUNE,
        FLAG_START_PLAYING_TUNE,
-       FLAG_BUTTON_REPEAT,
        FLAG_REFRESH_DISPLAY,
-       FLAG_PLAYING }; 
+       FLAG_PLAYING,
+       FLAG_BUTTON_BACK,
+       FLAG_BUTTON_FORWARD,
+       FLAG_BUTTON_PLAY,
+       FLAG_BUTTON_PAUSE,       
+       FLAG_UPDATE_INFO
+      };
 
-volatile byte playFlag;
+volatile int16_t playFlag;               // things like 50hz refresh from ISR
 volatile int interruptCountSkip = 0;  // Don't play new sequences via interrupt when this is positive (do nothing for 20ms x interruptCountSkip)
 uint32_t fileRemainingBytesToRead = 0;
-int16_t filesCount = 0;  // tallys just psg files
-int fileIndex = 0;   // file indexes start from zero
+//int16_t filesCount = 0;  // tallys just psg files
+//int fileIndex = -1;       // file indexes start from zero
+//int fileSelect = -1;       // file indexes start from zero
 
- // Last audio values for pausing/unpausing channels A, B, and C
+// Last audio values for pausing/unpausing channels A, B, and C
 volatile byte lastAudio_A;
 volatile byte lastAudio_B;
 volatile byte lastAudio_C;
@@ -149,10 +157,7 @@ byte circularBufferReadIndex;  // Byte Optimied : this counter wraps back to zer
 
 static byte LastAYEnableRegisiterUsed = 0;  // lets us set I/O ports without stamping over the AY's already enabled sound bits
 
-// optimise
-volatile int next = 0;
-int buttonwait = 0;
-byte delayCount = 0;  // =B10000000;
+//byte delayCount = 0;  // main loop 'FLAG_REFRESH_DISPLAY' @ 50hz , this scales that PAL rate down for things like button repeats
 
 // Audio
 int baseAudioVoltage = 0;     // initialised once in setup for VU meter - lowest point posible
@@ -165,209 +170,390 @@ volatile int audioMeanC = 0;  //   (Updated each display refresh)
 volatile int audioMeanB = 0;  //
 
 // These volume varaibles hold 0 to 15 ranges
-byte volumeChannelA = 0;       // Update each frame with the latest average values
-byte volumeChannelB = 0;       //   (rescaling value into 0 to 15, based on baseAudioVoltage and topAudioVoltage)
-byte volumeChannelC = 0;       //   (decremented each frame allowing the VU meter to drop slowly rather than flick arround)
-byte volumeChannelA_Prev = 0;  // Keeps the last volume value used, so we know when to update with a fresh value and when to decrement
-byte volumeChannelB_Prev = 0;  //   (i.e. audioA/B/C >= volumeChannelA/B/C_Prev read new value otherwise decrement to drop VU meter a little eadch frame)
-byte volumeChannelC_Prev = 0;
+byte volumeChannelA = 0;  // Update each frame with the latest average values
+byte volumeChannelB = 0;  //   (rescaling value into 0 to 15, based on baseAudioVoltage and topAudioVoltage)
+byte volumeChannelC = 0;  //   (decremented each frame allowing the VU meter to drop slowly rather than flick arround)
+//byte volumeChannelA_Prev = 0;  // Keeps the last volume value used, so we know when to update with a fresh value and when to decrement
+//byte volumeChannelB_Prev = 0;  //   (i.e. audioA/B/C >= volumeChannelA/B/C_Prev read new value otherwise decrement to drop VU meter a little eadch frame)
+//byte volumeChannelC_Prev = 0;
+
+uint16_t lastCurrentIndex = 0; 
+uint16_t currentIndex = 0; // Global or static variable to track the current file index
+uint16_t totalFiles;       // Set this from the temp.lst header
+const char *tempFileName = "/temp.lst"; 
+File tempFile;
+
+bool endsWithIgnoreCase(const String &str, const String &suffix) {
+  if (str.length() < suffix.length()) {
+    return false;
+  }
+  String strEnd = str.substring(str.length() - suffix.length());
+  return strEnd.equalsIgnoreCase(suffix);
+}
+
+String getFileByIndex(File &tempFile, size_t index) {
+    uint8_t header[6];
+    uint32_t offset;
+    uint16_t length;
+
+    tempFile.seek(4 + index * 6);
+    tempFile.read(header, 6);
+    //offset = header[0] | (header[1] << 8) | (header[2] << 16) | (header[3] << 24);
+        offset = static_cast<uint32_t>(header[0]) |
+             (static_cast<uint32_t>(header[1]) << 8) |
+             (static_cast<uint32_t>(header[2]) << 16) |
+             (static_cast<uint32_t>(header[3]) << 24);
+      length = static_cast<uint16_t>(header[4]) | (static_cast<uint16_t>(header[5]) << 8);
+
+    tempFile.seek(offset);
+    char fileName[length + 1];
+    tempFile.read((uint8_t *)fileName, length);
+    fileName[length] = '\0'; // Null-terminate the string
+
+    return String(fileName);
+}
+
+
+/*
+Here's how the header and filenames structured:
+  Header:
+    4 bytes, Total file count
+    4 bytes, Offset of the filename
+    2 bytes, Length of the filename
+  Filenames:
+    N bytes, filenames sequentially no nulls
+*/
+size_t CreatePsgFileList(File &outputFile) {
+  // --- First Pass: Count the total number of .PSG files ---
+  //size_t tempTotalFiles = 0;
+  uint32_t  tempTotalFiles = 0;
+  File entry = root.openNextFile();
+  while (entry) {
+    if (!entry.isDirectory()) {
+      String fileName = entry.name();
+      if (endsWithIgnoreCase(fileName, ".PSG")) {
+        tempTotalFiles++;
+      }
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+
+  if (tempTotalFiles == 0) {
+      return 0;
+  }
+
+  // Calculate header size: 4 bytes for total count, plus 6 bytes for each file (offset + length)
+  const size_t headerEntrySize = 4 + 2; // 4 bytes for offset, 2 bytes for length
+  const size_t headerSize = 4 + (tempTotalFiles * headerEntrySize); // 4 bytes for total count
+
+  // --- Second Pass: Write Header Part---
+  root.rewindDirectory(); // Restart the directory traversal
+  uint32_t currentOffset = headerSize; // Start writing strings after the header
+  outputFile.seek(0);
+
+  // Write total file count at the start of the header
+  outputFile.write(static_cast<uint8_t>(tempTotalFiles & 0xFF));
+  outputFile.write(static_cast<uint8_t>((tempTotalFiles >> 8) & 0xFF));
+  outputFile.write(static_cast<uint8_t>((tempTotalFiles >> 16) & 0xFF));
+  outputFile.write(static_cast<uint8_t>((tempTotalFiles >> 24) & 0xFF));
+
+ // size_t fileIndex = 0;
+  entry = root.openNextFile();
+  while (entry) {
+    if (!entry.isDirectory()) {
+      String fileName = entry.name();
+      if (endsWithIgnoreCase(fileName, ".PSG")) {
+        // Write header entry: offset (4 bytes) and length (2 bytes)
+        size_t fileNameLength = fileName.length();
+
+        // Write offset (4 bytes)
+        outputFile.write((uint8_t)(currentOffset & 0xFF));       
+        outputFile.write((uint8_t)((currentOffset >> 8) & 0xFF));
+        outputFile.write((uint8_t)((currentOffset >> 16) & 0xFF));
+        outputFile.write((uint8_t)((currentOffset >> 24) & 0xFF));
+
+        // Write length (2 bytes)
+        outputFile.write((uint8_t)(fileNameLength & 0xFF));
+        outputFile.write((uint8_t)((fileNameLength >> 8) & 0xFF));
+
+        // Update the current offset to be the next available position for writing the file name
+        currentOffset += fileNameLength;
+       // fileIndex++;
+      }
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+
+  // --- Third Pass: Write the file names ---
+  root.rewindDirectory(); 
+  entry = root.openNextFile();
+  while (entry) {
+    if (!entry.isDirectory()) {
+      String fileName = entry.name();
+      if (endsWithIgnoreCase(fileName, ".PSG")) {
+        outputFile.print(fileName);
+      }
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+  return tempTotalFiles;
+}
+
 
 // Startup the display, audit files, fire-up timer for AY at 1.75Mhz(update: re-assigned pins so now 2Mhz, OC1A is not as flexable as OCR2A) , reset AY chip
 void setup() {
 
-  // Serial.begin(9600);   // this library eats 177 bytes, dont forget to remove from release!!!
-  // Serial.println(sizeof(SdFat));
+  //Serial.begin(9600);   // this library eats 177 bytes, dont forget to remove from release!!!
+  //Serial.println(sizeof(SdFat));
   // NOTE: NOW USING TX, RX LINES .. using serial debug will mess things up
   // So to use debug first comment out PORTD writes, found in places like writeAY()
 
   setupOled();
   setupPins();
-
   setupClockForAYChip();  // Start AY clock before using the AY chip.
   resetAY();
 
 SD_CARD_MISSING_RETRY:
-  delay(1200);  // time to read the VERSION
-
+  delay(1200);  // allow time to read Version or Error Message
+ 
   if (SD.begin(CS_SDCARD_pin)) {
+
+    //------------------------------------
+    if (SD.exists(tempFileName)) {
+      SD.remove(tempFileName);
+    }
     root = SD.open("/");
+
     if (!root) {
       oled.println(F("SD card failed"));  // TODO ... optimise common parts of strings!!!
       SD.end();
       goto SD_CARD_MISSING_RETRY;
     }
+
+    tempFile = SD.open(tempFileName, FILE_WRITE);
+    totalFiles = CreatePsgFileList(tempFile);
+    tempFile.close();
+
   } else {
     oled.println(F("Waiting for SD card"));
     goto SD_CARD_MISSING_RETRY;
   }
 
-  filesCount = countPSGFiles();
-  if (filesCount == 0) {
+//  filesCount = countPSGFiles();
+  if (totalFiles == 0) {
     oled.println(F("SD card empty"));
     goto SD_CARD_MISSING_RETRY;
   }
 
-  setupProcessLogicTimer();  // start the logic interrupt up last
-
-  bitSet(playFlag, FLAG_START_PLAYING_TUNE);
-  bitSet(playFlag, FLAG_REFRESH_DISPLAY);
-
-  oled.clear();
+  // start the logic interrupt up last
+  setupProcessLogicTimer();
 
   // Sample AY audio lines (x3) for a baseline starting signal
   baseAudioVoltage = min(min(analogRead(AUDIO_FEEDBACK_A), analogRead(AUDIO_FEEDBACK_B)), analogRead(AUDIO_FEEDBACK_C));
+  tempFile = SD.open(tempFileName, FILE_READ);
+  oled.clear();
+
+  // -----------------------------------------------
+  // Play First Tune Found/uses inital currentIndex
+  bitSet(playFlag, FLAG_START_PLAYING_TUNE);
+  bitSet(playFlag, FLAG_UPDATE_INFO);
+  //    bitSet(playFlag, FLAG_REFRESH_DISPLAY);
+  //------------------------------------------------
 }
+
+
+int maxButtonVoltage = 0;
 
 void loop() {
 
-  if (bitRead(playFlag, FLAG_REFRESH_DISPLAY) || bitRead(playFlag, FLAG_PAUSE_TUNE)) {
+  if (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
+    bitClear(playFlag, FLAG_REFRESH_DISPLAY);
 
-    // vaules found from debugging button values are:- 20,325,511,845
-    // note: When running from battery power this measured voltage can sag a little
-    int buttonValue = analogRead(NextButton_pin);
+    int buttonValue = analogRead(NextButton_pin);  // values: 0 to 1023 (0 to +5v)
+    // Dynamically track the peak voltage, 100 units below the maximum
+    maxButtonVoltage = max(buttonValue - 100, maxButtonVoltage);
 
-    // Button thresholds identified through testing: 20, 325, 511, 845
-    // Allow slight variance for battery voltage sag
-    const int maxButtonVoltage = 900;
-    if (buttonValue <= maxButtonVoltage) {
-        if (buttonValue > 800) {
-            bitSet(playFlag, FLAG_NEXT_TUNE);
-        } else if (buttonValue > 500) {
-            bitSet(playFlag, FLAG_PAUSE_TUNE);
-            setChannelVolumes(0,0,0);
-        } else if (buttonValue > 300) {
-            bitClear(playFlag, FLAG_PAUSE_TUNE);
-            setChannelVolumes(PSG_REG_AMPLITUDE_A,PSG_REG_AMPLITUDE_B,PSG_REG_AMPLITUDE_C);
-        } else if (buttonValue > 20) {
-            bitSet(playFlag, FLAG_BACK_TUNE);
-        }
-    }
-  
-    if (delayCount == 0 || buttonValue > 4000) {
-      selectTune(playFlag);
-      
-      oled.setCursor(0, DISPLAY_ROW_FILE_COUNTER);
-      oled.print(fileIndex + 1);
-      oled.print(F("/"));
-      oled.print(filesCount);
-      oled.print(F(" "));
+    bitClear(playFlag, FLAG_BUTTON_BACK);
+    bitClear(playFlag, FLAG_BUTTON_PAUSE);
+    bitClear(playFlag, FLAG_BUTTON_PLAY);
+    bitClear(playFlag, FLAG_BUTTON_FORWARD);
+
+    if (buttonValue < maxButtonVoltage) {
+      if (buttonValue > 780) {  // reading 840
+        bitSet(playFlag, FLAG_BUTTON_BACK);
+      } else if (buttonValue > 480 && buttonValue < 580) {  // reading 510
+        bitSet(playFlag, FLAG_BUTTON_PAUSE);
+      } else if (buttonValue > 280 && buttonValue < 380) {  // reading 328
+        bitSet(playFlag, FLAG_BUTTON_PLAY);
+      } else /*20*/ {  // reading 22
+        bitSet(playFlag, FLAG_BUTTON_FORWARD);
+      }
     }
 
-    // Update and scale audio data for VU meter display.
-    // 'topAudioVoltage' tracks the highest signal level to map audio readings onto a 0-15 scale for the VU meter.
-    // It provides a dynamic range for the VU meter by adjusting to match peaks while gradually decaying over time.
-    // The decay effect (by decrementing `topAudioVoltage`) allows the displayed volume levels to slowly "slide down" 
-    // after each frame, which gives a visual "bounce" effect when audio levels drop. However, any audio channel exceeding
-    // the current `topAudioVoltage` will immediately "bump" it up, rescaling the VU meter to represent higher levels.
     topAudioVoltage = max(max(topAudioVoltage, audioMeanA), max(audioMeanB, audioMeanC));
     topAudioVoltage--;  // Decay the peak to create a sliding effect down to match updated audio levels.
-    int audioA = map(audioMeanA, baseAudioVoltage, topAudioVoltage, 0, 15);
-    int audioB = map(audioMeanB, baseAudioVoltage, topAudioVoltage, 0, 15);
-    int audioC = map(audioMeanC, baseAudioVoltage, topAudioVoltage, 0, 15);
-
-    volumeChannelA_Prev = volumeChannelA;   // keep track of previos values
-    volumeChannelB_Prev = volumeChannelB;
-    volumeChannelC_Prev = volumeChannelC;
-
-    // Note: volumeChannelX will never go negative as audioA/B/C can't (i.e 0 >= -N )
-    volumeChannelA = (audioA >= volumeChannelA_Prev) ? audioA : volumeChannelA - 1;
-    volumeChannelB = (audioB >= volumeChannelB_Prev) ? audioB : volumeChannelB - 1;
-    volumeChannelC = (audioC >= volumeChannelC_Prev) ? audioC : volumeChannelC - 1;
-
-    oled.setCursor((128 / 2) - 6 - 6 - 6, DISPLAY_ROW_VU_METER_TOP);
-    displayVuMeterTopPart(volumeChannelA);
-    displayVuMeterTopPart(volumeChannelB);
-    displayVuMeterTopPart(volumeChannelC);
-    oled.setCursor((128 / 2) - 6 - 6 - 6, DISPLAY_ROW_VU_METER_BOTTOM);
-    displayVuMeterBottomPart(volumeChannelA);
-    displayVuMeterBottomPart(volumeChannelB);
-    displayVuMeterBottomPart(volumeChannelC);
-
-    oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
-    oled.print(fileRemainingBytesToRead / 1024);
-
-    //  oled.print(but);
-    oled.print(F("K "));
-
-    SendVUMeterDataToAY_IO(audioA,audioB,audioC);
-    bitClear(playFlag, FLAG_REFRESH_DISPLAY);
-    delayCount -= (256 / 32);  // sample rate (letting byte wrap)  (don't move this, need to startup on zero)
-  }
-  
-  cacheSingleByteRead();  //cache more music data if needed
-}
-
-
-void selectTune(byte option) {
-  // Handle next or previous track selection
-  if (bitRead(option, FLAG_NEXT_TUNE)) {
-    bitClear(playFlag, FLAG_NEXT_TUNE);
-    if (++fileIndex >= filesCount) {
-      fileIndex = 0;
+    if (topAudioVoltage < baseAudioVoltage) {
+      topAudioVoltage = baseAudioVoltage;
     }
-    bitSet(playFlag, FLAG_START_PLAYING_TUNE);
-  }
-  if (bitRead(option, FLAG_BACK_TUNE)) {
-    bitClear(playFlag, FLAG_BACK_TUNE);
-    if (--fileIndex < 0) {
-      fileIndex = filesCount - 1;
-    }
-    bitSet(playFlag, FLAG_START_PLAYING_TUNE);
   }
 
-  if (bitRead(option, FLAG_START_PLAYING_TUNE)) {
 
+  if (bitRead(playFlag, FLAG_BUTTON_PAUSE)) {
+    bitClear(playFlag, FLAG_BUTTON_PAUSE);
     bitClear(playFlag, FLAG_PLAYING);
-    bitClear(playFlag, FLAG_START_PLAYING_TUNE);
-    resetAY();
+    bitSet(playFlag, FLAG_PAUSE_TUNE);
+  }
 
-    RESET_BUFFERS
+  if (bitRead(playFlag, FLAG_BUTTON_PLAY)) {
+    bitClear(playFlag, FLAG_BUTTON_PLAY);
 
-    selectFile(fileIndex);
+
+        if (bitRead(playFlag, FLAG_PAUSE_TUNE)) {
+          bitClear(playFlag, FLAG_PAUSE_TUNE);
+          bitSet(playFlag, FLAG_PLAYING);
+        } else if (lastCurrentIndex!=currentIndex) {
+          bitClear(playFlag, FLAG_PAUSE_TUNE);
+          bitSet(playFlag, FLAG_START_PLAYING_TUNE);
+        }
+    
+  }
+
+  if (bitRead(playFlag, FLAG_BUTTON_FORWARD)) {
+    bitClear(playFlag, FLAG_BUTTON_FORWARD);
+    currentIndex = (currentIndex + 1) % totalFiles;
+    bitSet(playFlag, FLAG_UPDATE_INFO);
+  }
+
+
+  if (bitRead(playFlag, FLAG_BUTTON_BACK)) {
+    bitClear(playFlag, FLAG_BUTTON_BACK);
+    currentIndex = (currentIndex > 0) ? currentIndex - 1 : totalFiles - 1;
+    bitSet(playFlag, FLAG_UPDATE_INFO);
+  }
+
+  if (bitRead(playFlag, FLAG_UPDATE_INFO)) {
+    bitClear(playFlag, FLAG_UPDATE_INFO);
     oled.setCursor(0, DISPLAY_ROW_FILENAME);
+    String fileName = getFileByIndex(tempFile, currentIndex);
+    oled.print(fileName);
+    oled.setCursor(0, DISPLAY_ROW_FILE_COUNTER);
+    oled.print(currentIndex + 1);
+    oled.print(F("/"));
+    oled.print(totalFiles);
+    oled.print(F(" "));
+  }
 
-    // NOTE: Since the SD source code has:  char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
-    const byte blankArea = strlen(file.name());
-    memset(file.name() + blankArea, ' ', 12 - blankArea);  // clear last few charactes, alowing for shorter names
-    oled.print((char*)file.name());                        // becase of the above fudge, this will disaply all 12 characters - so will clear old shorter names
 
+  if (bitRead(playFlag, FLAG_START_PLAYING_TUNE)) {
+    oled.setCursor(0, DISPLAY_ROW_FILENAME);
+    oled.print((char*)file.name());
+
+    lastCurrentIndex=currentIndex;
+    String fileName = getFileByIndex(tempFile, currentIndex);
+    if (file) { file.close(); }
+    file = SD.open(fileName);
+
+    fileRemainingBytesToRead = file.size();
+
+    file.seek(16);
+    fileRemainingBytesToRead -= 16;  //advancePastHeader();
+
+    resetAY();
+    startTune();
+
+    bitClear(playFlag, FLAG_START_PLAYING_TUNE);
     bitSet(playFlag, FLAG_PLAYING);
   }
 
+
+  if (bitRead(playFlag, FLAG_PLAYING)) {
+    if (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
+
+      volumeChannelA = map(audioMeanA, baseAudioVoltage, topAudioVoltage, 0, 15);
+      volumeChannelB = map(audioMeanB, baseAudioVoltage, topAudioVoltage, 0, 15);
+      volumeChannelC = map(audioMeanC, baseAudioVoltage, topAudioVoltage, 0, 15);
+      oled.setCursor((128 / 2) - 6 - 6 - 6, DISPLAY_ROW_VU_METER_TOP);
+      displayVuMeterTopPart(volumeChannelA);
+      displayVuMeterTopPart(volumeChannelB);
+      displayVuMeterTopPart(volumeChannelC);
+      oled.setCursor((128 / 2) - 6 - 6 - 6, DISPLAY_ROW_VU_METER_BOTTOM);
+      displayVuMeterBottomPart(volumeChannelA);
+      displayVuMeterBottomPart(volumeChannelB);
+      displayVuMeterBottomPart(volumeChannelC);
+
+
+      oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
+      oled.print(fileRemainingBytesToRead / 1024);
+      oled.print(F("K "));
+
+
+
+      SendVUMeterDataToAY_IO(volumeChannelA, volumeChannelB, volumeChannelC);
+    }
+
+    cacheSingleByteRead();  //cache more music data
+  } else {
+    setChannelVolumes(0, 0, 0);
+    //   if (bitRead(playFlag, FLAG_PAUSE_TUNE)) {
+    oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
+    oled.print(F(" || "));
+    //   }
+  }
+}
+
+bool startTune() {
+//  if (bitRead(option, FLAG_START_PLAYING_TUNE)) {
+ //   bitClear(playFlag, FLAG_START_PLAYING_TUNE);
+ //   resetAY();
+    RESET_BUFFERS
+    
+  //  selectFile(fileIndex);
+
+    // oled.setCursor(0, DISPLAY_ROW_FILENAME);
+
+    // // NOTE: Since the SD source code has:  char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
+    // const byte blankArea = strlen(file.name());
+    // memset(file.name() + blankArea, ' ', 12 - blankArea);  // clear last few charactes, alowing for shorter names
+    // oled.print((char*)file.name());                        // becase of the above fudge, this will disaply all 12 characters - so will clear old shorter names
+
+ //   bitSet(playFlag, FLAG_PLAYING);
+    return true;
+ // }
+  //return false;
 }
 
 void SendVUMeterDataToAY_IO(byte audioA, byte audioB, byte audioC) {
-    writeAY(PSG_REG_ENABLE, B11000000 | LastAYEnableRegisiterUsed);
+  //enable AY's I/O preserving anthing in use
+  writeAY(PSG_REG_ENABLE, B11000000 | LastAYEnableRegisiterUsed);
 
-    const byte threshold = 2;  // Equivalent to 15 / (8 - 1)
-    byte bits = 0;
-    byte avgAudio = (2 * audioA + audioB) / 3;
-
-    for (int i = 0; i < 8; i++) {
-      if (avgAudio > i * threshold) {
-        bits |= 1 << i;
-      }
+  const int avgAudio1 = audioA + audioA + audioA + audioB;
+  const int avgAudio2 = audioC + audioC + audioC + audioB;
+  byte bitsA = 0, bitsB = 0;
+ 
+// oled.setCursor(0, DISPLAY_ROW_FILENAME);
+//oled.print(avgAudio1);
+//oled.print("   ");
+  for (int i = 0; i < 8; i++) {
+    if (avgAudio1 > i * ((15*4)/8)) {
+      bitsA |= 1 << i;
     }
-
-    writeAY(PSG_REG_IOA, bits);
-
-    bits = 0;
-    avgAudio = (2 * audioC + audioB) / 3;
-
-    for (int i = 0; i < 8; i++) {
-      if (avgAudio > i * threshold) {
-        bits |= 1 << i;
-      }
+    if (avgAudio2 > i * ((15*4)/8)) {
+      bitsB |= 1 << i;
     }
-
-    writeAY(PSG_REG_IOB, bits);
+  }
+  writeAY(PSG_REG_IOA, bitsB);  // IOA goes to Right side of VU segment!
+  writeAY(PSG_REG_IOB, bitsA);  // IOB goes to Left side of VU segment!
 }
 
 
+
 void setChannelVolumes(byte a, byte b, byte c) {
-    writeAY(PSG_REG_AMPLITUDE_A, a);
-    writeAY(PSG_REG_AMPLITUDE_B, b);
-    writeAY(PSG_REG_AMPLITUDE_C, c);
+  writeAY(PSG_REG_AMPLITUDE_A, a);
+  writeAY(PSG_REG_AMPLITUDE_B, b);
+  writeAY(PSG_REG_AMPLITUDE_C, c);
 }
 
 // Set AY8910 hardware pins BDIR and BC1 (AY modes)
@@ -375,8 +561,8 @@ void setChannelVolumes(byte a, byte b, byte c) {
 //----------------------------------------------
 // BDIR BC2 BC1 State
 //----------------------------------------------
-//  0    1   0   Inactive 
-//  0    1   1   Read from external device 
+//  0    1   0   Inactive
+//  0    1   1   Read from external device
 //  1    1   0   Write to external device
 //  1    1   1   Latch Address
 //----------------------------------------------
@@ -402,9 +588,6 @@ void setAYMode(AYMode mode) {
   //https://garretlab.web.fc2.com/en/arduino/inside/hardware/arduino/avr/cores/arduino/Arduino.h/digitalPinToBitMask.html
 }
 
-/*  
- * Interrupt Driven - keep this function lightweight  
- */
 void writeAY(byte psg_register, byte data) {
   if (psg_register < PSG_REG_TOTAL) {
 
@@ -463,7 +646,7 @@ void setupOled() {
   oled.begin(&Adafruit128x32, I2C_ADDRESS);
   delay(100);
   oled.begin(&Adafruit128x32, I2C_ADDRESS);  // some hardware is slow to initialise, first call does not work.
-  oled.setFont(fudged_Adafruit5x7); // original Adafruit5x7 font with tweeks at start for VU meter
+  oled.setFont(fudged_Adafruit5x7);          // original Adafruit5x7 font with tweeks at start for VU meter
   oled.clear();
   oled.print(F("PSG Music Player\nusing the AY-3-8910\n\nver"));
   oled.println(F(VERSION));
@@ -494,40 +677,46 @@ void setupPins() {
   pinMode(SCK_SDCARD_pin, INPUT);
 }
 
+/*  
+ * Interrupt Driven - keep this function lightweight  
+ */
 ISR(TIMER2_COMPA_vect) {
 
   // This interrupt logic runs at a higher frequency than needed. The best fit for the ISR setup was 250Hz,
-  // due to the 8-bit resolution of Arduino's 'timer2'. Therefore, we need to ignore/scale this frequency 
+  // due to the 8-bit resolution of Arduino's 'timer2'. Therefore, we need to ignore/scale this frequency
   // down to match the 50Hz PAL playback rate used by 99.9% of music.
 
   volatile static byte ISR_Scaler = 0;  // used to slow frequency down to 50Hz
 
   if (!bitRead(playFlag, FLAG_PLAYING)) {
-    return;
-  }
-
-  if (!bitRead(playFlag, FLAG_PAUSE_TUNE)) {
+    audioAsum = 0;
+    audioBsum = 0;
+    audioCsum = 0;
+  }else {
     // Sample AY channels A,B and C
     audioAsum += analogRead(AUDIO_FEEDBACK_B);
     audioBsum += analogRead(AUDIO_FEEDBACK_B);
     audioCsum += analogRead(AUDIO_FEEDBACK_C);
+  }
 
-    // 50 Hz, 250 interrupts per second / 50 = 5 steps per 20ms
-    if (++ISR_Scaler >= (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY)) {
-      audioMeanA = audioAsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
-      audioMeanB = audioBsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
-      audioMeanC = audioCsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
-      audioAsum = 0;
-      audioBsum = 0;
-      audioCsum = 0;
+  // Need 50 Hz playback, so we take the 250 best fit interrupts per second / 50 = 5 steps per 20ms
+  if (++ISR_Scaler >= (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY)) {
+    audioMeanA = audioAsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
+    audioMeanB = audioBsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
+    audioMeanC = audioCsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
+    audioAsum = 0;
+    audioBsum = 0;
+    audioCsum = 0;
 
-      if (interruptCountSkip > 0) {
-        interruptCountSkip--;
-      } else {
+    if (interruptCountSkip > 0) {  // Don't play sequences when positive
+      interruptCountSkip--;
+    } else {
+      if (bitRead(playFlag, FLAG_PLAYING)) {
         processPSG();
       }
-      ISR_Scaler = 0;
     }
+    ISR_Scaler = 0;
+
     // 50Hz rate - also a good timing to refresh the display & UV meter
     bitSet(playFlag, FLAG_REFRESH_DISPLAY);
   }
@@ -565,12 +754,18 @@ void setupProcessLogicTimer() {
 
 void processPSG() {
   // Called by interrupt so keep this method as lightweight as possiblle
-  byte action, dat;
-  while (readBuffer(action)) {
-    switch (action) {
-      case END_OF_MUSIC_0xFD: bitSet(playFlag, FLAG_NEXT_TUNE); return;
+  byte action;
+
+
+
+ while (readBuffer(action)) {
+
+   switch (action) {
+      // !!!!!!!!!! ?????? !!!!!!!!!!! this lines a issue for the tune : "Condomed Track 2.PSG"   
+      case END_OF_MUSIC_0xFD:  bitSet(playFlag, FLAG_START_PLAYING_TUNE); return;  
       case END_OF_INTERRUPT_0xFF: return;
     }
+    byte dat;
     if (readBuffer(dat)) {
       switch (action) {
 
@@ -600,36 +795,51 @@ void processPSG() {
           writeAY(action, dat);
           break;
         case PSG_REG_AMPLITUDE_C:
-          lastAudio_C = dat; 
-          // Drops into default case
+          lastAudio_C = dat;
+          [[fallthrough]]; 
         default:                 // 0x00 to 0xFC
           writeAY(action, dat);  // port & control regisiter
           break;                 // read more data - while loop
       }
     } else {
       circularBufferReadIndex--;  // CACHE WAS NOT READY - NOTHING HAPPEND, HOWEVER WE MUST REWIND THE ACTION OF FIRST readBuffer
+break; // leave now and allow main loop to start refilling cache!
+
     }
   }
 }
 
 // Reset AY chip to stop sound output
 void resetAY() {
+
+//    writeAY(PSG_REG_IOA, 0);             // make sure VU meter is off
+ // writeAY(PSG_REG_IOB, 0);             // (nothing set so no LED's will come on yet)
+  
+      audioAsum = 0;
+    audioBsum = 0;
+    audioCsum = 0;
+    audioMeanA = 0;
+    audioMeanB = 0;
+    audioMeanC = 0;
+
   lastAudio_A = 0;
   lastAudio_B = 0;
   lastAudio_C = 0;
   setAYMode(INACTIVE);
   // Reset line needs to go High->Low->High for AY38910/12
   digitalWrite(ResetAY_pin, HIGH);  // just incase start high
-  delay(1);
-  digitalWrite(ResetAY_pin, LOW);   // Reset pulse width must be min of 500ns
-  delay(1);
+//  delay(1);
+  digitalWrite(ResetAY_pin, LOW);  // Reset pulse width must be min of 500ns
+//  delay(1);
   digitalWrite(ResetAY_pin, HIGH);
-  delay(1);
+//  delay(1);
   setAYMode(INACTIVE);
 
-  writeAY(PSG_REG_ENABLE, B11000000);  // enable I/O
+   writeAY(PSG_REG_ENABLE, B11000000);  // enable I/O
   writeAY(PSG_REG_IOA, 0);             // make sure VU meter is off
   writeAY(PSG_REG_IOB, 0);             // (nothing set so no LED's will come on yet)
+  
+
 }
 
 // ------------------------------
@@ -651,25 +861,43 @@ inline bool readBuffer(byte& dat) {
   }
 }
 
-inline int advancePastHeader() {
-  // see: PSG FILE - HEADER & DATA DETAILS 
+inline int advancePastPSGHeaderxxx() {
+  // see: PSG FILE - HEADER & DATA DETAILS
   file.seek(16);  // absolute position -  Skip header
   return 16;
 }
 
+/*
 // Here we are checking for the "PSG" file's header, byte by byte to help limit memory usage.
 // note: if found, global 'file' will have advanced 3 bytes
 inline bool isFilePSG() {
   if (file && !file.isDirectory()) {
+
     // Reading one byte at a time... Helps in saving some stack space.
-    return (file.available() && file.read() == 'P' && 
-            file.available() && file.read() == 'S' && 
-            file.available() && file.read() == 'G');
+    return (file.available() && file.read() == 'P' && file.available() && file.read() == 'S' && file.available() && file.read() == 'G');
   }
   return false;
 }
+*/
+
+inline bool isFilePSG() {
+  if (!file || file.isDirectory() || file.available() < 3) {
+    return false;
+  }
+
+  char buffer[3];
+  file.readBytes(buffer, 3);
+
+  return memcmp(buffer, "PSG", 3) == 0;
+}
+
+
+/*
 
 int16_t countPSGFiles() {
+
+   root.rewindDirectory();
+
   int16_t total = 0;
   while (true) {
     file = root.openNextFile();
@@ -684,8 +912,10 @@ int16_t countPSGFiles() {
   root.rewindDirectory();
   return total;
 }
+*/
 
-void selectFile(int fileIndex) {  // optimise
+/*
+void selectFilexxx(int fileIndex) {  // optimise
   if (file) {
     file.close();
   }
@@ -693,25 +923,33 @@ void selectFile(int fileIndex) {  // optimise
   int k = 0;
   file = root.openNextFile();
   while (file) {
-    if (isFilePSG()) {
-      if (k == fileIndex) {
-        fileRemainingBytesToRead = file.size();
-        if (fileRemainingBytesToRead > 16) {  // check we have a body, 16 PSG header
+
+    if (k == fileIndex) {
+      fileRemainingBytesToRead = file.size();
+      if (fileRemainingBytesToRead > 16) {  // check we have a body, 16 PSG header
+
+        char buffer[3];
+        file.readBytes(buffer, 3);
+        if (memcmp(buffer, "PSG", 3) == 0) {
           fileRemainingBytesToRead -= advancePastHeader();
           break;  // Found it - leave this file open, cache takes over from here on and process it.
         }
       }
-      k++;
     }
+    k++;
+
     file.close();  // This isn't the file you're looking for, continue looking.
     file = root.openNextFile();
   }
 }
-
+*/
 // Reads a single byte from the SD card into the cache (circular buffer)
 // Anything after EOF sets a END_OF_MUSIC_0xFD command into the cache
 // which will trigger a FLAG_PLAY_NEXT_TUNE.
 void cacheSingleByteRead() {
+
+  if (file){
+
   if (circularBufferLoadIndex == circularBufferReadIndex - 1)  // Check if there is enough space in the buffer to write a new byte
     return;                                                    // There is no space in the buffer, so exit the function
 
@@ -728,6 +966,7 @@ void cacheSingleByteRead() {
   }
   // Increment the circular buffer load index.
   ADVANCE_LOAD_BUFFER  // Note: using byte will wrap around to zero automatically
+  }
 }
 
 
@@ -796,4 +1035,107 @@ and/or R17 will follow thesignals applied to the I/O port(s). However,
 transfer of this data to the CPU bus requires a “read” operation as
 described above.
 
+*/
+
+
+
+
+
+/*
+  if (bitRead(playFlag, FLAG_BUTTON_PLAY)) {
+
+         bitClear(playFlag, FLAG_PLAYING);
+
+      fileIndex = fileSelect;
+  //    root = rootPlaying;
+     // file = filePlaying;
+      
+        if (file){ file.close();}
+     file = SD.open(filePlaying.name()); //"180.psg");
+ // file = SD.open("180.psg");
+
+
+                   file.seek(16);  
+            fileRemainingBytesToRead -= 16; //advancePastHeader();
+    //        bitSet(playFlag, FLAG_START_PLAYING_TUNE);
+
+
+   oled.setCursor(0, DISPLAY_ROW_FILENAME);
+    // NOTE: Since the SD source code has:  char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
+ //   const byte blankArea = strlen(file.name());
+ //   memset(file.name() + blankArea, ' ', 12 - blankArea);  // clear last few charactes, alowing for shorter names
+    oled.print((char*)file.name());  
+
+      bitSet(playFlag, FLAG_START_PLAYING_TUNE);
+  }
+*/
+
+
+
+/*
+void selectTune(byte option) {
+
+
+  // Handle next or previous track selection
+  if (bitRead(option, FLAG_NEXT_TUNE)) {
+    bitClear(playFlag, FLAG_NEXT_TUNE);
+
+      do {
+        file.close();
+        file = root.openNextFile();
+        fileRemainingBytesToRead = file.size();
+        if (fileRemainingBytesToRead > 16) {  // check we have a body, 16 PSG header
+
+          char buffer[3];
+          file.readBytes(buffer, 3);
+          if (memcmp(buffer, "PSG", 3) == 0) {
+            fileRemainingBytesToRead -= advancePastHeader();
+
+            if (++fileIndex >= filesCount) {
+              root.rewindDirectory();
+              fileIndex = 0;
+            }
+
+            break;  // Found it - leave this file open, cache takes over from here on and process it.
+          }
+        }
+
+      } while (file || (fileIndex==0));
+
+
+    bitSet(playFlag, FLAG_START_PLAYING_TUNE);
+  } else if (bitRead(option, FLAG_BACK_TUNE)) {
+    bitClear(playFlag, FLAG_BACK_TUNE);
+    if (--fileIndex < 0) {
+      fileIndex = filesCount - 1;
+    }
+    bitSet(playFlag, FLAG_START_PLAYING_TUNE);
+  }
+}
+*/
+
+
+/*
+void SendVUMeterDataToAY_IO(byte audioA, byte audioB, byte audioC) {
+    writeAY(PSG_REG_ENABLE, B11000000 | LastAYEnableRegisiterUsed);
+
+    const byte threshold = 2;  // Equivalent to 15 / (8 - 1)
+    byte bits = 0;
+    byte avgAudio = (2 * audioA + audioB) / 3;
+    for (int i = 0; i < 8; i++) {
+      if (avgAudio > i * threshold) {
+        bits |= 1 << i;
+      }
+    }
+    writeAY(PSG_REG_IOA, bits);
+
+    bits = 0;
+    avgAudio = (2 * audioC + audioB) / 3;
+    for (int i = 0; i < 8; i++) {
+      if (avgAudio > i * threshold) {
+        bits |= 1 << i;
+      }
+    }
+    writeAY(PSG_REG_IOB, bits);
+}
 */
