@@ -43,7 +43,7 @@ extern void setupClockForAYChip();
 extern void setupOled();
 extern int16_t countPSGFiles();
 extern void setupProcessLogicTimer();
-extern void selectFile(byte index);
+//extern void selectFile(byte index);
 extern void cacheSingleByteRead();
 extern void displayVuMeterTopPart(byte volume);
 extern void displayVuMeterBottomPart(int volume);
@@ -51,8 +51,8 @@ extern bool isCacheReady();
 extern void setAYMode(AYMode mode);
 extern void setChannelVolumes(byte a, byte b, byte c);
 extern void SendVUMeterDataToAY_IO(byte audioA, byte audioB, byte audioC);
-extern void selectTune(byte option);
-extern bool startTune();
+//extern void selectTune(byte option);
+//extern bool startTune();
 
 #define VERSION ("2.4")
 
@@ -119,12 +119,6 @@ SSD1306AsciiAvrI2c oled;
 #define DISPLAY_ROW_VU_METER_TOP (2)
 #define DISPLAY_ROW_VU_METER_BOTTOM (3)
 
-// SD card root directory and file object
-File root;  // Note: 'File' struct "EATS UP 27 BYTES"
-File file;
-//File filePlaying;
-//File rootPlaying; 
-
 // Play flags for control states (e.g., start, pause, refresh)
 enum { FLAG_NEXT_TUNE,
        FLAG_BACK_TUNE,
@@ -142,9 +136,6 @@ enum { FLAG_NEXT_TUNE,
 volatile int16_t playFlag;               // things like 50hz refresh from ISR
 volatile int interruptCountSkip = 0;  // Don't play new sequences via interrupt when this is positive (do nothing for 20ms x interruptCountSkip)
 uint32_t fileRemainingBytesToRead = 0;
-//int16_t filesCount = 0;  // tallys just psg files
-//int fileIndex = -1;       // file indexes start from zero
-//int fileSelect = -1;       // file indexes start from zero
 
 // Last audio values for pausing/unpausing channels A, B, and C
 volatile byte lastAudio_A;
@@ -156,8 +147,6 @@ byte circularBufferLoadIndex;  // Byte Optimied : this counter wraps back to zer
 byte circularBufferReadIndex;  // Byte Optimied : this counter wraps back to zero by design
 
 static byte LastAYEnableRegisiterUsed = 0;  // lets us set I/O ports without stamping over the AY's already enabled sound bits
-
-//byte delayCount = 0;  // main loop 'FLAG_REFRESH_DISPLAY' @ 50hz , this scales that PAL rate down for things like button repeats
 
 // Audio
 int baseAudioVoltage = 0;     // initialised once in setup for VU meter - lowest point posible
@@ -173,16 +162,19 @@ volatile int audioMeanB = 0;  //
 byte volumeChannelA = 0;  // Update each frame with the latest average values
 byte volumeChannelB = 0;  //   (rescaling value into 0 to 15, based on baseAudioVoltage and topAudioVoltage)
 byte volumeChannelC = 0;  //   (decremented each frame allowing the VU meter to drop slowly rather than flick arround)
-//byte volumeChannelA_Prev = 0;  // Keeps the last volume value used, so we know when to update with a fresh value and when to decrement
-//byte volumeChannelB_Prev = 0;  //   (i.e. audioA/B/C >= volumeChannelA/B/C_Prev read new value otherwise decrement to drop VU meter a little eadch frame)
-//byte volumeChannelC_Prev = 0;
 
 uint16_t lastCurrentIndex = 0; 
 uint16_t currentIndex = 0; // Global or static variable to track the current file index
 uint16_t totalFiles;       // Set this from the temp.lst header
 const char *tempFileName = "/temp.lst"; 
-File tempFile;
 
+// SD card root directory and file object
+File root;  // Note: 'File' struct "EATS UP 27 BYTES"
+File file;
+//File tempFile;
+
+
+/*
 bool endsWithIgnoreCase(const String &str, const String &suffix) {
   if (str.length() < suffix.length()) {
     return false;
@@ -190,28 +182,52 @@ bool endsWithIgnoreCase(const String &str, const String &suffix) {
   String strEnd = str.substring(str.length() - suffix.length());
   return strEnd.equalsIgnoreCase(suffix);
 }
+*/
+bool endsWithIgnoreCase(const char* str, const char* suffix) {
+  size_t strLen = strlen(str);
+  size_t suffixLen = strlen(suffix);
+  if (strLen < suffixLen) return false;
 
-String getFileByIndex(File &tempFile, size_t index) {
-    uint8_t header[6];
-    uint32_t offset;
-    uint16_t length;
-
-    tempFile.seek(4 + index * 6);
-    tempFile.read(header, 6);
-    //offset = header[0] | (header[1] << 8) | (header[2] << 16) | (header[3] << 24);
-        offset = static_cast<uint32_t>(header[0]) |
-             (static_cast<uint32_t>(header[1]) << 8) |
-             (static_cast<uint32_t>(header[2]) << 16) |
-             (static_cast<uint32_t>(header[3]) << 24);
-      length = static_cast<uint16_t>(header[4]) | (static_cast<uint16_t>(header[5]) << 8);
-
-    tempFile.seek(offset);
-    char fileName[length + 1];
-    tempFile.read((uint8_t *)fileName, length);
-    fileName[length] = '\0'; // Null-terminate the string
-
-    return String(fileName);
+  const char* strEnd = str + strLen - suffixLen;
+  return strcasecmp(strEnd, suffix) == 0;
 }
+
+
+const char* getFileNameByIndex(File &tempFile, size_t index) {
+  uint32_t offset;
+  uint16_t length;
+
+  // Calculate the position in the header for the given index
+  tempFile.seek(4 + index * 6);
+
+  // Read the offset directly as a 4-byte integer
+  offset = static_cast<uint32_t>(tempFile.read()) |
+           (static_cast<uint32_t>(tempFile.read()) << 8) |
+           (static_cast<uint32_t>(tempFile.read()) << 16) |
+           (static_cast<uint32_t>(tempFile.read()) << 24);
+
+  // Read the length directly as a 2-byte integer
+  length = static_cast<uint16_t>(tempFile.read()) |
+           (static_cast<uint16_t>(tempFile.read()) << 8);
+
+  // Seek to the file name position
+  tempFile.seek(offset);
+
+  // Read the file name
+  //char fileName[length + 1];
+  static char fileName[8+4+1];
+  fileName[length]='.';
+  fileName[length+1]='P';
+  fileName[length+2]='S';
+  fileName[length+3]='G';
+
+  tempFile.read((uint8_t *)fileName, length);
+  fileName[length+4] = '\0';  // Null-terminate the string
+
+  //return String(fileName);
+  return fileName;
+}
+
 
 
 /*
@@ -230,8 +246,9 @@ size_t CreatePsgFileList(File &outputFile) {
   File entry = root.openNextFile();
   while (entry) {
     if (!entry.isDirectory()) {
-      String fileName = entry.name();
-      if (endsWithIgnoreCase(fileName, ".PSG")) {
+     //String fileName = entry.name();
+      //if (endsWithIgnoreCase(fileName, ".PSG")) {
+      if (endsWithIgnoreCase(entry.name(), ".PSG")) {
         tempTotalFiles++;
       }
     }
@@ -262,10 +279,12 @@ size_t CreatePsgFileList(File &outputFile) {
   entry = root.openNextFile();
   while (entry) {
     if (!entry.isDirectory()) {
-      String fileName = entry.name();
-      if (endsWithIgnoreCase(fileName, ".PSG")) {
+      //String fileName = entry.name();
+      //if (endsWithIgnoreCase(fileName, ".PSG")) {
+      if (endsWithIgnoreCase(entry.name(), ".PSG")) {
         // Write header entry: offset (4 bytes) and length (2 bytes)
-        size_t fileNameLength = fileName.length();
+      //  size_t fileNameLength = fileName.length();
+      size_t fileNameLength = strlen(entry.name()) -4;   // don't include the ".PSG" in size
 
         // Write offset (4 bytes)
         outputFile.write((uint8_t)(currentOffset & 0xFF));       
@@ -291,9 +310,17 @@ size_t CreatePsgFileList(File &outputFile) {
   entry = root.openNextFile();
   while (entry) {
     if (!entry.isDirectory()) {
-      String fileName = entry.name();
-      if (endsWithIgnoreCase(fileName, ".PSG")) {
-        outputFile.print(fileName);
+     // String fileName = entry.name();
+     // if (endsWithIgnoreCase(fileName, ".PSG")) {
+      if (endsWithIgnoreCase(entry.name(), ".PSG")) {
+
+
+    // NOTE: Reusing other memory!!!! Since the SD source code has: char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
+     const byte i = strlen(entry.name()) -4;
+     entry.name()[i] = 0;
+   
+
+        outputFile.print(entry.name());
       }
     }
     entry.close();
@@ -333,9 +360,9 @@ SD_CARD_MISSING_RETRY:
       goto SD_CARD_MISSING_RETRY;
     }
 
-    tempFile = SD.open(tempFileName, FILE_WRITE);
-    totalFiles = CreatePsgFileList(tempFile);
-    tempFile.close();
+    file = SD.open(tempFileName, FILE_WRITE);
+    totalFiles = CreatePsgFileList(file);
+    file.close();
 
   } else {
     oled.println(F("Waiting for SD card"));
@@ -353,7 +380,12 @@ SD_CARD_MISSING_RETRY:
 
   // Sample AY audio lines (x3) for a baseline starting signal
   baseAudioVoltage = min(min(analogRead(AUDIO_FEEDBACK_A), analogRead(AUDIO_FEEDBACK_B)), analogRead(AUDIO_FEEDBACK_C));
-  tempFile = SD.open(tempFileName, FILE_READ);
+//  tempFile = SD.open(tempFileName, FILE_READ);
+
+root.close();
+root = SD.open(tempFileName, FILE_READ);
+
+
   oled.clear();
 
   // -----------------------------------------------
@@ -362,8 +394,9 @@ SD_CARD_MISSING_RETRY:
   bitSet(playFlag, FLAG_UPDATE_INFO);
   //    bitSet(playFlag, FLAG_REFRESH_DISPLAY);
   //------------------------------------------------
-}
 
+  
+}
 
 int maxButtonVoltage = 0;
 
@@ -400,7 +433,6 @@ void loop() {
     }
   }
 
-
   if (bitRead(playFlag, FLAG_BUTTON_PAUSE)) {
     bitClear(playFlag, FLAG_BUTTON_PAUSE);
     bitClear(playFlag, FLAG_PLAYING);
@@ -411,14 +443,13 @@ void loop() {
     bitClear(playFlag, FLAG_BUTTON_PLAY);
 
 
-        if (bitRead(playFlag, FLAG_PAUSE_TUNE)) {
-          bitClear(playFlag, FLAG_PAUSE_TUNE);
-          bitSet(playFlag, FLAG_PLAYING);
-        } else if (lastCurrentIndex!=currentIndex) {
-          bitClear(playFlag, FLAG_PAUSE_TUNE);
-          bitSet(playFlag, FLAG_START_PLAYING_TUNE);
-        }
-    
+    if (bitRead(playFlag, FLAG_PAUSE_TUNE)) {
+      bitClear(playFlag, FLAG_PAUSE_TUNE);
+      bitSet(playFlag, FLAG_PLAYING);
+    } else if (lastCurrentIndex != currentIndex) {
+      bitClear(playFlag, FLAG_PAUSE_TUNE);
+      bitSet(playFlag, FLAG_START_PLAYING_TUNE);
+    }
   }
 
   if (bitRead(playFlag, FLAG_BUTTON_FORWARD)) {
@@ -427,17 +458,27 @@ void loop() {
     bitSet(playFlag, FLAG_UPDATE_INFO);
   }
 
-
   if (bitRead(playFlag, FLAG_BUTTON_BACK)) {
     bitClear(playFlag, FLAG_BUTTON_BACK);
     currentIndex = (currentIndex > 0) ? currentIndex - 1 : totalFiles - 1;
     bitSet(playFlag, FLAG_UPDATE_INFO);
   }
 
+//Sketch uses 23756 bytes (77%) of program storage space. Maximum is 30720 bytes. (using String)
+//Global variables use 1269 bytes (61%) of dynamic memory, leaving 779 bytes for local variables. Maximum is 2048 bytes.
+//Sketch uses 23060 bytes (75%) of program storage space. Maximum is 30720 bytes. (using char* only)
+//Global variables use 1269 bytes (61%) of dynamic memory, leaving 779 bytes for local variables. Maximum is 2048 bytes.
+//Sketch uses 23112 bytes (75%) of program storage space. Maximum is 30720 bytes.  // reducing efforts
+//Global variables use 1268 bytes (61%) of dynamic memory, leaving 780 bytes for local variables. Maximum is 2048 bytes.
+//Sketch uses 23102 bytes (75%) of program storage space. Maximum is 30720 bytes.  // better reusing root!
+//Global variables use 1241 bytes (60%) of dynamic memory, leaving 807 bytes for local variables. Maximum is 2048 bytes.
+
+
   if (bitRead(playFlag, FLAG_UPDATE_INFO)) {
     bitClear(playFlag, FLAG_UPDATE_INFO);
     oled.setCursor(0, DISPLAY_ROW_FILENAME);
-    String fileName = getFileByIndex(tempFile, currentIndex);
+//    const char* fileName = getFileNameByIndex(tempFile, currentIndex);
+        const char* fileName = getFileNameByIndex(root, currentIndex);
     oled.print(fileName);
     oled.setCursor(0, DISPLAY_ROW_FILE_COUNTER);
     oled.print(currentIndex + 1);
@@ -446,28 +487,28 @@ void loop() {
     oled.print(F(" "));
   }
 
-
   if (bitRead(playFlag, FLAG_START_PLAYING_TUNE)) {
-    oled.setCursor(0, DISPLAY_ROW_FILENAME);
-    oled.print((char*)file.name());
 
-    lastCurrentIndex=currentIndex;
-    String fileName = getFileByIndex(tempFile, currentIndex);
+    lastCurrentIndex = currentIndex;
+    //const char* fileName = getFileNameByIndex(tempFile, currentIndex);
+        const char* fileName = getFileNameByIndex(root, currentIndex);
     if (file) { file.close(); }
     file = SD.open(fileName);
+
+    oled.setCursor(0, DISPLAY_ROW_FILENAME);
+    oled.print((char*)file.name());
 
     fileRemainingBytesToRead = file.size();
 
     file.seek(16);
-    fileRemainingBytesToRead -= 16;  //advancePastHeader();
+    fileRemainingBytesToRead -= 16;  // Advance Past Header
 
     resetAY();
-    startTune();
+    RESET_BUFFERS
 
     bitClear(playFlag, FLAG_START_PLAYING_TUNE);
     bitSet(playFlag, FLAG_PLAYING);
   }
-
 
   if (bitRead(playFlag, FLAG_PLAYING)) {
     if (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
@@ -484,12 +525,9 @@ void loop() {
       displayVuMeterBottomPart(volumeChannelB);
       displayVuMeterBottomPart(volumeChannelC);
 
-
       oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
       oled.print(fileRemainingBytesToRead / 1024);
       oled.print(F("K "));
-
-
 
       SendVUMeterDataToAY_IO(volumeChannelA, volumeChannelB, volumeChannelC);
     }
@@ -497,32 +535,9 @@ void loop() {
     cacheSingleByteRead();  //cache more music data
   } else {
     setChannelVolumes(0, 0, 0);
-    //   if (bitRead(playFlag, FLAG_PAUSE_TUNE)) {
     oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
     oled.print(F(" || "));
-    //   }
   }
-}
-
-bool startTune() {
-//  if (bitRead(option, FLAG_START_PLAYING_TUNE)) {
- //   bitClear(playFlag, FLAG_START_PLAYING_TUNE);
- //   resetAY();
-    RESET_BUFFERS
-    
-  //  selectFile(fileIndex);
-
-    // oled.setCursor(0, DISPLAY_ROW_FILENAME);
-
-    // // NOTE: Since the SD source code has:  char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
-    // const byte blankArea = strlen(file.name());
-    // memset(file.name() + blankArea, ' ', 12 - blankArea);  // clear last few charactes, alowing for shorter names
-    // oled.print((char*)file.name());                        // becase of the above fudge, this will disaply all 12 characters - so will clear old shorter names
-
- //   bitSet(playFlag, FLAG_PLAYING);
-    return true;
- // }
-  //return false;
 }
 
 void SendVUMeterDataToAY_IO(byte audioA, byte audioB, byte audioC) {
@@ -532,23 +547,18 @@ void SendVUMeterDataToAY_IO(byte audioA, byte audioB, byte audioC) {
   const int avgAudio1 = audioA + audioA + audioA + audioB;
   const int avgAudio2 = audioC + audioC + audioC + audioB;
   byte bitsA = 0, bitsB = 0;
- 
-// oled.setCursor(0, DISPLAY_ROW_FILENAME);
-//oled.print(avgAudio1);
-//oled.print("   ");
+
   for (int i = 0; i < 8; i++) {
-    if (avgAudio1 > i * ((15*4)/8)) {
+    if (avgAudio1 > i * ((15 * 4) / 8)) {
       bitsA |= 1 << i;
     }
-    if (avgAudio2 > i * ((15*4)/8)) {
+    if (avgAudio2 > i * ((15 * 4) / 8)) {
       bitsB |= 1 << i;
     }
   }
   writeAY(PSG_REG_IOA, bitsB);  // IOA goes to Right side of VU segment!
   writeAY(PSG_REG_IOB, bitsA);  // IOB goes to Left side of VU segment!
 }
-
-
 
 void setChannelVolumes(byte a, byte b, byte c) {
   writeAY(PSG_REG_AMPLITUDE_A, a);
@@ -685,14 +695,13 @@ ISR(TIMER2_COMPA_vect) {
   // This interrupt logic runs at a higher frequency than needed. The best fit for the ISR setup was 250Hz,
   // due to the 8-bit resolution of Arduino's 'timer2'. Therefore, we need to ignore/scale this frequency
   // down to match the 50Hz PAL playback rate used by 99.9% of music.
-
-  volatile static byte ISR_Scaler = 0;  // used to slow frequency down to 50Hz
+  static byte ISR_Scaler = 0;  // used to slow frequency down to 50Hz
 
   if (!bitRead(playFlag, FLAG_PLAYING)) {
     audioAsum = 0;
     audioBsum = 0;
     audioCsum = 0;
-  }else {
+  } else {
     // Sample AY channels A,B and C
     audioAsum += analogRead(AUDIO_FEEDBACK_B);
     audioBsum += analogRead(AUDIO_FEEDBACK_B);
@@ -755,14 +764,11 @@ void setupProcessLogicTimer() {
 void processPSG() {
   // Called by interrupt so keep this method as lightweight as possiblle
   byte action;
+  while (readBuffer(action)) {
 
-
-
- while (readBuffer(action)) {
-
-   switch (action) {
-      // !!!!!!!!!! ?????? !!!!!!!!!!! this lines a issue for the tune : "Condomed Track 2.PSG"   
-      case END_OF_MUSIC_0xFD:  bitSet(playFlag, FLAG_START_PLAYING_TUNE); return;  
+    switch (action) {
+      // !!!!!!!!!! ?????? !!!!!!!!!!! this lines a issue for the tune : "Condomed Track 2.PSG"
+      case END_OF_MUSIC_0xFD: bitSet(playFlag, FLAG_START_PLAYING_TUNE); return;
       case END_OF_INTERRUPT_0xFF: return;
     }
     byte dat;
@@ -796,50 +802,40 @@ void processPSG() {
           break;
         case PSG_REG_AMPLITUDE_C:
           lastAudio_C = dat;
-          [[fallthrough]]; 
+          [[fallthrough]];
         default:                 // 0x00 to 0xFC
           writeAY(action, dat);  // port & control regisiter
           break;                 // read more data - while loop
       }
     } else {
       circularBufferReadIndex--;  // CACHE WAS NOT READY - NOTHING HAPPEND, HOWEVER WE MUST REWIND THE ACTION OF FIRST readBuffer
-break; // leave now and allow main loop to start refilling cache!
-
+      break;                      // leave now and allow main loop to start refilling cache!
     }
   }
 }
 
 // Reset AY chip to stop sound output
 void resetAY() {
-
-//    writeAY(PSG_REG_IOA, 0);             // make sure VU meter is off
- // writeAY(PSG_REG_IOB, 0);             // (nothing set so no LED's will come on yet)
-  
-      audioAsum = 0;
-    audioBsum = 0;
-    audioCsum = 0;
-    audioMeanA = 0;
-    audioMeanB = 0;
-    audioMeanC = 0;
+  audioAsum = 0;
+  audioBsum = 0;
+  audioCsum = 0;
+  audioMeanA = 0;
+  audioMeanB = 0;
+  audioMeanC = 0;
 
   lastAudio_A = 0;
   lastAudio_B = 0;
   lastAudio_C = 0;
-  setAYMode(INACTIVE);
+  setAYMode(INACTIVE); 
   // Reset line needs to go High->Low->High for AY38910/12
   digitalWrite(ResetAY_pin, HIGH);  // just incase start high
-//  delay(1);
-  digitalWrite(ResetAY_pin, LOW);  // Reset pulse width must be min of 500ns
-//  delay(1);
+  digitalWrite(ResetAY_pin, LOW);   // Reset pulse width must be min of 500ns
   digitalWrite(ResetAY_pin, HIGH);
-//  delay(1);
   setAYMode(INACTIVE);
 
-   writeAY(PSG_REG_ENABLE, B11000000);  // enable I/O
+  writeAY(PSG_REG_ENABLE, B11000000);  // enable I/O
   writeAY(PSG_REG_IOA, 0);             // make sure VU meter is off
   writeAY(PSG_REG_IOB, 0);             // (nothing set so no LED's will come on yet)
-  
-
 }
 
 // ------------------------------
@@ -861,111 +857,38 @@ inline bool readBuffer(byte& dat) {
   }
 }
 
-inline int advancePastPSGHeaderxxx() {
-  // see: PSG FILE - HEADER & DATA DETAILS
-  file.seek(16);  // absolute position -  Skip header
-  return 16;
-}
-
-/*
-// Here we are checking for the "PSG" file's header, byte by byte to help limit memory usage.
-// note: if found, global 'file' will have advanced 3 bytes
-inline bool isFilePSG() {
-  if (file && !file.isDirectory()) {
-
-    // Reading one byte at a time... Helps in saving some stack space.
-    return (file.available() && file.read() == 'P' && file.available() && file.read() == 'S' && file.available() && file.read() == 'G');
-  }
-  return false;
-}
-*/
-
 inline bool isFilePSG() {
   if (!file || file.isDirectory() || file.available() < 3) {
     return false;
   }
-
-  char buffer[3];
-  file.readBytes(buffer, 3);
-
-  return memcmp(buffer, "PSG", 3) == 0;
+  return (file.available() && file.read() == 'P' && file.available() && file.read() == 'S' && file.available() && file.read() == 'G');
+  //char buffer[3];
+  //file.readBytes(buffer, 3);
+  //return memcmp(buffer, "PSG", 3) == 0;
 }
 
-
-/*
-
-int16_t countPSGFiles() {
-
-   root.rewindDirectory();
-
-  int16_t total = 0;
-  while (true) {
-    file = root.openNextFile();
-    if (!file) {
-      break;
-    }
-    if (isFilePSG()) {
-      total++;
-    }
-    file.close();
-  }
-  root.rewindDirectory();
-  return total;
-}
-*/
-
-/*
-void selectFilexxx(int fileIndex) {  // optimise
-  if (file) {
-    file.close();
-  }
-  root.rewindDirectory();
-  int k = 0;
-  file = root.openNextFile();
-  while (file) {
-
-    if (k == fileIndex) {
-      fileRemainingBytesToRead = file.size();
-      if (fileRemainingBytesToRead > 16) {  // check we have a body, 16 PSG header
-
-        char buffer[3];
-        file.readBytes(buffer, 3);
-        if (memcmp(buffer, "PSG", 3) == 0) {
-          fileRemainingBytesToRead -= advancePastHeader();
-          break;  // Found it - leave this file open, cache takes over from here on and process it.
-        }
-      }
-    }
-    k++;
-
-    file.close();  // This isn't the file you're looking for, continue looking.
-    file = root.openNextFile();
-  }
-}
-*/
 // Reads a single byte from the SD card into the cache (circular buffer)
 // Anything after EOF sets a END_OF_MUSIC_0xFD command into the cache
 // which will trigger a FLAG_PLAY_NEXT_TUNE.
 void cacheSingleByteRead() {
 
-  if (file){
+  if (file) {
+    if (circularBufferLoadIndex == circularBufferReadIndex - 1)  // Check if there is enough space in the buffer to write a new byte
+      return;                                                    // There is no space in the buffer, so exit the function
 
-  if (circularBufferLoadIndex == circularBufferReadIndex - 1)  // Check if there is enough space in the buffer to write a new byte
-    return;                                                    // There is no space in the buffer, so exit the function
+    // Special case: Check if the circular buffer is full and the read index is at the beginning.
+    if (circularBufferLoadIndex == (BUFFER_SIZE - 1) && circularBufferReadIndex == 0)
+      return;
 
-  // Special case: Check if the circular buffer is full and the read index is at the beginning.
-  if (circularBufferLoadIndex == (BUFFER_SIZE - 1) && circularBufferReadIndex == 0)
-    return;
-
-  if (fileRemainingBytesToRead >= 1) {  // Read a byte from the file and store it in the circular buffer
-    playBuf[circularBufferLoadIndex] = file.read();
-    fileRemainingBytesToRead--;
-  } else {
-    // There is no more data in the file, so write the end-of-music byte instead
-    playBuf[circularBufferLoadIndex] = END_OF_MUSIC_0xFD;
-  }
-  // Increment the circular buffer load index.
-  ADVANCE_LOAD_BUFFER  // Note: using byte will wrap around to zero automatically
+    if (fileRemainingBytesToRead >= 1) {  // Read a byte from the file and store it in the circular buffer
+      playBuf[circularBufferLoadIndex] = file.read();
+      fileRemainingBytesToRead--;
+    } else {
+      // There is no more data in the file, so write the end-of-music byte instead
+      playBuf[circularBufferLoadIndex] = END_OF_MUSIC_0xFD;
+    }
+    // Increment the circular buffer load index.
+    ADVANCE_LOAD_BUFFER  // Note: using byte will wrap around to zero automatically
   }
 }
 
@@ -1137,5 +1060,123 @@ void SendVUMeterDataToAY_IO(byte audioA, byte audioB, byte audioC) {
       }
     }
     writeAY(PSG_REG_IOB, bits);
+}
+*/
+
+
+
+/*
+
+int16_t countPSGFiles() {
+
+   root.rewindDirectory();
+
+  int16_t total = 0;
+  while (true) {
+    file = root.openNextFile();
+    if (!file) {
+      break;
+    }
+    if (isFilePSG()) {
+      total++;
+    }
+    file.close();
+  }
+  root.rewindDirectory();
+  return total;
+}
+*/
+
+/*
+void selectFilexxx(int fileIndex) {  // optimise
+  if (file) {
+    file.close();
+  }
+  root.rewindDirectory();
+  int k = 0;
+  file = root.openNextFile();
+  while (file) {
+
+    if (k == fileIndex) {
+      fileRemainingBytesToRead = file.size();
+      if (fileRemainingBytesToRead > 16) {  // check we have a body, 16 PSG header
+
+        char buffer[3];
+        file.readBytes(buffer, 3);
+        if (memcmp(buffer, "PSG", 3) == 0) {
+          fileRemainingBytesToRead -= advancePastHeader();
+          break;  // Found it - leave this file open, cache takes over from here on and process it.
+        }
+      }
+    }
+    k++;
+
+    file.close();  // This isn't the file you're looking for, continue looking.
+    file = root.openNextFile();
+  }
+}
+*/
+
+/*
+// Here we are checking for the "PSG" file's header, byte by byte to help limit memory usage.
+// note: if found, global 'file' will have advanced 3 bytes
+inline bool isFilePSG() {
+  if (file && !file.isDirectory()) {
+
+    // Reading one byte at a time... Helps in saving some stack space.
+    return (file.available() && file.read() == 'P' && file.available() && file.read() == 'S' && file.available() && file.read() == 'G');
+  }
+  return false;
+}
+*/
+
+
+/*
+bool startTune() {
+
+    RESET_BUFFERS
+    
+  //  selectFile(fileIndex);
+
+    // oled.setCursor(0, DISPLAY_ROW_FILENAME);
+
+    // // NOTE: Since the SD source code has:  char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
+    // const byte blankArea = strlen(file.name());
+    // memset(file.name() + blankArea, ' ', 12 - blankArea);  // clear last few charactes, alowing for shorter names
+    // oled.print((char*)file.name());                        // becase of the above fudge, this will disaply all 12 characters - so will clear old shorter names
+
+    return true;
+ // }
+  //return false;
+}
+*/
+
+
+/*
+inline int advancePastPSGHeaderxxx() {
+  // see: PSG FILE - HEADER & DATA DETAILS
+  file.seek(16);  // absolute position -  Skip header
+  return 16;
+}
+*/
+
+
+/*
+String getFileByIndex(File &tempFile, size_t index) {
+  uint8_t header[6];
+  uint32_t offset;
+  uint16_t length;
+
+  tempFile.seek(4 + index * 6);
+  tempFile.read(header, 6);
+  offset = static_cast<uint32_t>(header[0]) | (static_cast<uint32_t>(header[1]) << 8) | (static_cast<uint32_t>(header[2]) << 16) | (static_cast<uint32_t>(header[3]) << 24);
+  length = static_cast<uint16_t>(header[4]) | (static_cast<uint16_t>(header[5]) << 8);
+
+  tempFile.seek(offset);
+  char fileName[length + 1];
+  tempFile.read((uint8_t *)fileName, length);
+  fileName[length] = '\0';  // Null-terminate the string
+
+  return String(fileName);
 }
 */
