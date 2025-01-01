@@ -1,7 +1,7 @@
-## AY-3-8910-PSG-MusicPlayer-VU-Meter
+## AY-3-8910 PSG Music Player with VU Meter
 
 ### Music Player Release
-This iteration features a reduced hardware design and an enhanced user interface.
+This version features a streamlined hardware design and an improved user interface.
 
 #### Hardware Used
 - Arduino Nano
@@ -11,10 +11,11 @@ This iteration features a reduced hardware design and an enhanced user interface
 - Buttons (x4)
 - Audio Jack
 
-The Arduino Nano is a small, powerful microcontroller board based on the ATmega328P chip. Similar to Arduino Uno, but smaller and more affordable. It has 14 digital I/O, 8 analog inputs, 16 MHz clock speed, USB connectivity and it's easy to program using the Arduino IDE. 
-The Nano is used to drive an AY-3 sound chip by connecting the necessary pins from the Nano to the AY-3 chip. The Nano controls the AY-3's sound output by sending control signals to the chip via digital pins. The OLED display and SD card reader are connected to the Nano using the I2C and SPI communication protocols, respectively. The 4 input buttons use a single pin on the Nano, with the use of resistor ladder to provide different 'analog voltages' to the Nano when the buttons are pressed allowing different actions.
+The **Arduino Nano** is a small yet powerful microcontroller board based on the ATmega328P chip. Similar to the Arduino Uno but smaller and more affordable, it features 14 digital I/O pins, 8 analog inputs, a 16 MHz clock speed, and USB connectivity. It is easy to program using the Arduino IDE. In this project, the Nano drives the AY-3 sound chip by connecting its digital pins to the chip's control inputs. The Nano sends control signals to the AY-3 to produce sound.
 
-An OLED is a type of OLED (organic light-emitting diode) display that can be used with an Arduino microcontroller board. The display has a resolution of 32x128 pixels, which means it can display 32 columns of 128 rows. OLED displays are known for their high contrast, fast response time and wide viewing angles, they are also energy efficient as they don't require a backlight.  It can be connected using the I2C communication protocol, which only requires 4 wires using the SDA and SCL pins including VCC and GND pins to provide power to the OLED display.
+The **OLED display** and **SD card reader** are connected to the Nano using the I2C and SPI communication protocols, respectively. The four input buttons share a single Nano pin through a resistor ladder, which generates distinct analog voltages for each button press. This enables multiple actions, such as play, pause, and select, with minimal hardware.
+
+The **OLED display** has a resolution of 32x128 pixels, enabling it to display text and simple graphics. OLEDs are known for their high contrast, fast response times, wide viewing angles, and energy efficiency, as they do not require a backlight. The display connects to the Nano via the I2C protocol, which requires only four wires (SDA, SCL, VCC, and GND).
 
 #### A Brief History of the AY-3 Programmable Sound Generator (PSG) Chip
 1977: General Instrument (GI) introduces the AY-3-891x series of PSG chips as a low-cost alternative to the Yamaha YM2149F PSG.
