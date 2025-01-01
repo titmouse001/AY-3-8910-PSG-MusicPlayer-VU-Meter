@@ -18,15 +18,17 @@ The **OLED display** and **SD card reader** are connected to the Nano using the 
 The **OLED display** has a resolution of 32x128 pixels, enabling it to display text and simple graphics. OLEDs are known for their high contrast, fast response times, wide viewing angles, and energy efficiency, as they do not require a backlight. The display connects to the Nano via the I2C protocol, which requires only four wires (SDA, SCL, VCC, and GND).
 
 #### A Brief History of the AY-3 Programmable Sound Generator (PSG) Chip
-1977: General Instrument (GI) introduces the AY-3-891x series of PSG chips as a low-cost alternative to the Yamaha YM2149F PSG.
-Late 1970s to early 1980s: AY-3-891x chips are widely used in home computers, game consoles, and arcade games due to their low cost and good sound quality.
+- **1977:** General Instrument (GI) introduced the AY-3-891x series of PSG chips as a low-cost alternative to the Yamaha YM2149F.
+- **Late 1970s to early 1980s:** AY-3-891x chips were widely used in home computers, game consoles, and arcade games due to their affordability and good sound quality.
 
-#### Overview of the AY-3-891x
-- 3 audio channels
-- Square wave, white noise, and tone generation
-- Envelope generator for sound control (attack, decay, sustain, release)
-- Low cost alternative to Yamaha YM2149F
-- Widely used in home computers, game consoles and arcade games
+#### Overview of the AY-3-891x PSG
+- Three independent audio channels
+- Supports square wave, white noise, and tone generation
+- Built-in envelope generator for sound control (attack, decay, sustain, release)
+- Affordable alternative to the Yamaha YM2149F
+- Widely used in vintage home computers, game consoles, and arcade games
+
+The AY-3-8910 remains a popular chip among retro computing and gaming enthusiasts due to its versatility and distinctive sound capabilities.
 
 #### PCB 
 <img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/Photo View_2023-01-25.svg" width="45%" />
