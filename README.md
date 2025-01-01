@@ -20,7 +20,7 @@ _This version features a streamlined hardware design and an improved user interf
 - Envelope generator for sound shaping
 
 #### PCB 
-<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/Photo View_2023-01-25.svg" width="45%" />
+<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/Photo-View_2025-01-01.svg" width="45%" />
 
 #### Breadboard Prototype (top view)
 <img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/BreadboardPrototypePic1.png" width="45%" />
