@@ -19,15 +19,19 @@ _This version features a streamlined hardware design and an improved user interf
 - Square wave, white noise, and tone generation
 - Envelope generator for sound shaping
 
-#### PCB 
-<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/Photo-View_2025-01-01.svg" width="45%" />
-
-#### Breadboard Prototype (top view)
-<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/BreadboardPrototypePic1.png" width="45%" />
-
-#### Breadboard Prototype (side view)
-<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/BreadboardPrototypePic2.png" width="45%" />
-
+#### PCB Layouts
+<div style="float:left;margin:0 10px 10px 0" markdown="1">
+<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/Photo-View_2025-01-01.svg" width="31%" />
+<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/Photo_PCB_Front-2.2.PNG" width="32%" />
+<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/Photo_PCB_Back-2.2.PNG" width="33%" />
+<div>
+  
+#### Breadboard Prototype - testing resistor ladder (top & side views)
+<div style="float:left;margin:0 10px 10px 0" markdown="1">
+<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/BreadboardPrototypePic1.png" width="51%" />
+<img src="/AY-3-8910-PSG-MusicPlayerREWORKED/Pictures_Prototyping/BreadboardPrototypePic2.png" width="40%" />
+<div>
+  
 ----
 _Research and resources used in the development of this project_ :  
 [Resistor Ladder](https://github.com/bxparks/AceButton/blob/develop/docs/resistor_ladder/README.md)
