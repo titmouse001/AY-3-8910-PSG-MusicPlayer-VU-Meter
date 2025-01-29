@@ -43,7 +43,6 @@ extern void setupClockForAYChip();
 extern void setupOled();
 extern int16_t countPSGFiles();
 extern void setupProcessLogicTimer();
-//extern void selectFile(byte index);
 extern void cacheSingleByteRead();
 extern void displayVuMeterTopPart(byte volume);
 extern void displayVuMeterBottomPart(int volume);
@@ -51,8 +50,12 @@ extern bool isCacheReady();
 extern void setAYMode(AYMode mode);
 extern void setChannelVolumes(byte a, byte b, byte c);
 extern void SendVUMeterDataToAY_IO(byte audioA, byte audioB, byte audioC);
-//extern void selectTune(byte option);
-//extern bool startTune();
+extern bool isPsgFile(const char* fileName);
+extern void writeUint32(File& file, uint32_t value);
+extern void writeUint16(File& file, uint16_t value);
+extern bool endsWithIgnoreCase(const char* str, const char* suffix);
+extern const char* getFileNameByIndex(File& tempFile, size_t index);
+extern size_t CreatePsgFileList(File& outputFile);
 
 #define VERSION ("2.4")
 
@@ -136,14 +139,8 @@ enum {
 };
 
 volatile int16_t playFlag;            // things like 50hz refresh from ISR
-//volatile int16_t lastPlayFlag; 
 volatile int interruptCountSkip = 0;  // Don't play new sequences via interrupt when this is positive (do nothing for 20ms x interruptCountSkip)
 uint32_t fileRemainingBytesToRead = 0;
-
-// Last audio values for pausing/unpausing channels A, B, and C
-//volatile byte lastAudio_A;
-//volatile byte lastAudio_B;
-//volatile byte lastAudio_C;
 
 // Circular buffer indices
 byte circularBufferLoadIndex;  // Byte Optimied : this counter wraps back to zero by design (using 256 buffer option)
@@ -152,16 +149,11 @@ byte circularBufferReadIndex;  // Byte Optimied : this counter wraps back to zer
 static byte LastAYEnableRegisiterUsed = 0;  // lets us set I/O ports without stamping over the AY's already enabled sound bits
 
 // Audio
-uint16_t baseAudioVoltage = 0;     // initialised once in setup for VU meter - lowest point posible
-uint16_t topAudioVoltage = 0;      // for VU meter stepup - highest point posible
+uint16_t baseAudioVoltage = 0;     // initialised once in setup for VU meter  - lowest point possible
+uint16_t topAudioVoltage = 0;      //                 for VU meter scale top - highest point possible
 volatile uint16_t audioMeanA = 0;  //
 volatile uint16_t audioMeanC = 0;  //   (Updated each display refresh)
 volatile uint16_t audioMeanB = 0;  //
-
-// These volume varaibles hold 0 to 15 ranges
-//byte volumeChannelA = 0;  // Update each frame with the latest average values
-//byte volumeChannelB = 0;  //   (rescaling value into 0 to 15, based on baseAudioVoltage and topAudioVoltage)
-//byte volumeChannelC = 0;  //   (decremented each frame allowing the VU meter to drop slowly rather than flick arround)
 
 uint16_t lastCurrentIndex = 0;
 uint16_t currentIndex = 0;  // Global or static variable to track the current file index
@@ -183,240 +175,6 @@ uint8_t lastVolumeChannelB =0;
 uint8_t lastVolumeChannelC =0;
 
 bool nextTuneUsed = false;
-
-
-bool endsWithIgnoreCase(const char* str, const char* suffix) {
-  size_t strLen = strlen(str);
-  size_t suffixLen = strlen(suffix);
-  if (strLen < suffixLen) return false;
-
-  const char* strEnd = str + strLen - suffixLen;
-  return strcasecmp(strEnd, suffix) == 0;
-}
-
-
-const char* getFileNameByIndex(File& tempFile, size_t index) {
-  uint32_t offset;
-  uint16_t length;
-
-  // Calculate the position in the header for the given index
-  tempFile.seek(4 + index * 6);
-
-  // Read the offset directly as a 4-byte integer
-  offset = static_cast<uint32_t>(tempFile.read()) | (static_cast<uint32_t>(tempFile.read()) << 8) | (static_cast<uint32_t>(tempFile.read()) << 16) | (static_cast<uint32_t>(tempFile.read()) << 24);
-
-  // Read the length directly as a 2-byte integer
-  length = static_cast<uint16_t>(tempFile.read()) | (static_cast<uint16_t>(tempFile.read()) << 8);
-
-  // Seek to the file name position
-  tempFile.seek(offset);
-
-  // Read the file name
-  //char fileName[length + 1];
-  static char fileName[8 + 4 + 1];
-  fileName[length] = '.';
-  fileName[length + 1] = 'P';
-  fileName[length + 2] = 'S';
-  fileName[length + 3] = 'G';
-
-  tempFile.read((uint8_t*)fileName, length);
-  fileName[length + 4] = '\0';  // Null-terminate the string
-
-  //return String(fileName);
-  return fileName;
-}
-
-
-
-/*
-Here's how the header and filenames are structured:
-  Header:
-    4 bytes, Total file count
-    4 bytes, Offset of the filename
-    2 bytes, Length of the filename
-  Filenames:
-    N bytes, filenames sequentially, no nulls
-*/
-
-// Helper function to check if a file has a .PSG extension
-bool isPsgFile(const char* fileName) {
-  return endsWithIgnoreCase(fileName, ".PSG");
-}
-
-// Helper function to write a 32-bit integer to the output file
-void writeUint32(File& file, uint32_t value) {
-  file.write((uint8_t)(value & 0xFF));
-  file.write((uint8_t)((value >> 8) & 0xFF));
-  file.write((uint8_t)((value >> 16) & 0xFF));
-  file.write((uint8_t)((value >> 24) & 0xFF));
-}
-
-// Helper function to write a 16-bit integer to the output file
-void writeUint16(File& file, uint16_t value) {
-  file.write((uint8_t)(value & 0xFF));
-  file.write((uint8_t)((value >> 8) & 0xFF));
-}
-
-size_t CreatePsgFileList(File& outputFile) {
-  // --- First Pass: Count the total number of .PSG files ---
-  uint32_t totalFiles = 0;
-  File entry = root.openNextFile();
-  while (entry) {
-    if (!entry.isDirectory() && isPsgFile(entry.name())) {
-      totalFiles++;
-    }
-    entry.close();
-    entry = root.openNextFile();
-  }
-
-  if (totalFiles == 0) {
-    return 0; // No .PSG files found
-  }
-
-  // Calculate header size: 4 bytes for total count, plus 6 bytes for each file (offset + length)
-  const size_t headerEntrySize = 4 + 2; // 4 bytes for offset, 2 bytes for length
-  const size_t headerSize = 4 + (totalFiles * headerEntrySize); // 4 bytes for total count
-
-  // --- Second Pass: Write Header Part ---
-  root.rewindDirectory(); // Restart the directory traversal
-  uint32_t currentOffset = headerSize; // Start writing strings after the header
-  outputFile.seek(0);
-
-  // Write total file count at the start of the header
-  writeUint32(outputFile, totalFiles);
-
-  entry = root.openNextFile();
-  while (entry) {
-    if (!entry.isDirectory() && isPsgFile(entry.name())) {
-      size_t fileNameLength = strlen(entry.name()) - 4; // Exclude ".PSG" from the length
-
-      // Write offset (4 bytes)
-      writeUint32(outputFile, currentOffset);
-
-      // Write length (2 bytes)
-      writeUint16(outputFile, fileNameLength);
-
-      // Update the current offset for the next file name
-      currentOffset += fileNameLength;
-    }
-    entry.close();
-    entry = root.openNextFile();
-  }
-
-  // --- Third Pass: Write the file names ---
-  root.rewindDirectory();
-  entry = root.openNextFile();
-  while (entry) {
-    if (!entry.isDirectory() && isPsgFile(entry.name())) {
-      // Remove ".PSG" from the file name before writing
-      char fileName[13]; // Assuming 8.3 filename format
-      strncpy(fileName, entry.name(), strlen(entry.name()) - 4);
-      fileName[strlen(entry.name()) - 4] = '\0'; // Null-terminate the string
-
-      // Write the file name to the output file
-      outputFile.print(fileName);
-    }
-    entry.close();
-    entry = root.openNextFile();
-  }
-
-  return totalFiles;
-}
-
-//----
-
-/*
-
-size_t CreatePsgFileList(File& outputFile) {
-  // --- First Pass: Count the total number of .PSG files ---
-  //size_t tempTotalFiles = 0;
-  uint32_t tempTotalFiles = 0;
-  File entry = root.openNextFile();
-  while (entry) {
-    if (!entry.isDirectory()) {
-      //String fileName = entry.name();
-      //if (endsWithIgnoreCase(fileName, ".PSG")) {
-      if (endsWithIgnoreCase(entry.name(), ".PSG")) {
-        tempTotalFiles++;
-      }
-    }
-    entry.close();
-    entry = root.openNextFile();
-  }
-
-  if (tempTotalFiles == 0) {
-    return 0;
-  }
-
-  // Calculate header size: 4 bytes for total count, plus 6 bytes for each file (offset + length)
-  const size_t headerEntrySize = 4 + 2;                              // 4 bytes for offset, 2 bytes for length
-  const size_t headerSize = 4 + (tempTotalFiles * headerEntrySize);  // 4 bytes for total count
-
-  // --- Second Pass: Write Header Part---
-  root.rewindDirectory();               // Restart the directory traversal
-  uint32_t currentOffset = headerSize;  // Start writing strings after the header
-  outputFile.seek(0);
-
-  // Write total file count at the start of the header
-  outputFile.write(static_cast<uint8_t>(tempTotalFiles & 0xFF));
-  outputFile.write(static_cast<uint8_t>((tempTotalFiles >> 8) & 0xFF));
-  outputFile.write(static_cast<uint8_t>((tempTotalFiles >> 16) & 0xFF));
-  outputFile.write(static_cast<uint8_t>((tempTotalFiles >> 24) & 0xFF));
-
-  // size_t fileIndex = 0;
-  entry = root.openNextFile();
-  while (entry) {
-    if (!entry.isDirectory()) {
-      //String fileName = entry.name();
-      //if (endsWithIgnoreCase(fileName, ".PSG")) {
-      if (endsWithIgnoreCase(entry.name(), ".PSG")) {
-        // Write header entry: offset (4 bytes) and length (2 bytes)
-        //  size_t fileNameLength = fileName.length();
-        size_t fileNameLength = strlen(entry.name()) - 4;  // don't include the ".PSG" in size
-
-        // Write offset (4 bytes)
-        outputFile.write((uint8_t)(currentOffset & 0xFF));
-        outputFile.write((uint8_t)((currentOffset >> 8) & 0xFF));
-        outputFile.write((uint8_t)((currentOffset >> 16) & 0xFF));
-        outputFile.write((uint8_t)((currentOffset >> 24) & 0xFF));
-
-        // Write length (2 bytes)
-        outputFile.write((uint8_t)(fileNameLength & 0xFF));
-        outputFile.write((uint8_t)((fileNameLength >> 8) & 0xFF));
-
-        // Update the current offset to be the next available position for writing the file name
-        currentOffset += fileNameLength;
-        // fileIndex++;
-      }
-    }
-    entry.close();
-    entry = root.openNextFile();
-  }
-
-  // --- Third Pass: Write the file names ---
-  root.rewindDirectory();
-  entry = root.openNextFile();
-  while (entry) {
-    if (!entry.isDirectory()) {
-      // String fileName = entry.name();
-      // if (endsWithIgnoreCase(fileName, ".PSG")) {
-      if (endsWithIgnoreCase(entry.name(), ".PSG")) {
-
-
-        // NOTE: Reusing other memory!!!! Since the SD source code has: char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
-        const byte i = strlen(entry.name()) - 4;
-        entry.name()[i] = 0;
-
-
-        outputFile.print(entry.name());
-      }
-    }
-    entry.close();
-    entry = root.openNextFile();
-  }
-  return tempTotalFiles;
-}
-*/
 
 // Startup the display, audit files, fire-up timer for AY at 1.75Mhz(update: re-assigned pins so now 2Mhz, OC1A is not as flexable as OCR2A) , reset AY chip
 void setup() {
@@ -494,7 +252,6 @@ SD_CARD_MISSING_RETRY:
 //Global variables use 1241 bytes (60%) of dynamic memory, leaving 807 bytes for local variables. Maximum is 2048 bytes.
 
 
-
 // Utility: Handles forward/backward button logic
 void handleButtonWithDelay(uint8_t flag, int delta) {
   if (bitRead(playFlag, flag)) {
@@ -512,42 +269,37 @@ void handleButtonWithDelay(uint8_t flag, int delta) {
   }
 }
 
-// Button Voltage Thresholds (replace magic numbers)
-const int BUTTON_BACK_THRESHOLD = 780;
-const int BUTTON_FORWARD_MIN = 480;
-const int BUTTON_FORWARD_MAX = 580;
-const int BUTTON_PLAY_PAUSE_MIN = 280;
-const int BUTTON_PLAY_PAUSE_MAX = 380;
+// Button Voltage Thresholds - Values: 0 to 1023 (0 to +5v)
+const int BUTTON_BACK_THRESHOLD = 845 - 45;  //780; 
+const int BUTTON_FORWARD_MIN = 515-45;   ///480;
+const int BUTTON_FORWARD_MAX = 512+45;   //580;
+const int BUTTON_PLAY_PAUSE_MIN = 328-45;  //280;
+const int BUTTON_PLAY_PAUSE_MAX = 328+45; //380;
+// last button 20
 
-int maxButtonVoltage;
+int maxButtonVoltage=0;   
 bool stateChangeHandled = false;
+
 void loop() {
 
-
-
   if (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
-    bitClear(playFlag, FLAG_REFRESH_DISPLAY);
-
     int buttonValue = analogRead(NextButton_pin);                 // Values: 0 to 1023 (0 to +5v)
-    maxButtonVoltage = max(buttonValue - 100, maxButtonVoltage);  // -100 dead zone
+
+    // This line determines the upper voltage limit when no buttons are pressed.  
+    // NOTE: Any buttons held during power-up will cancel themselves out as the detected value will not be lower than this reading.  
+    maxButtonVoltage = max(buttonValue - 100, maxButtonVoltage);  // Capture highest voltage (with a arbitrary -100 dead zone for any noise)
 
     // Clear all button flags
     playFlag &= ~((1 << FLAG_BUTTON_BACK) | (1 << FLAG_BUTTON_PAUSE) | (1 << FLAG_BUTTON_PLAY) | (1 << FLAG_BUTTON_FORWARD));
 
-
     if (bitRead(playFlag, FLAG_NEXT_TUNE)) {
-
-        currentIndex = (currentIndex + 1 ) % totalFiles;  
+      currentIndex = (currentIndex + 1) % totalFiles;
       bitSet(playFlag, FLAG_UPDATE_INFO);
-        bitSet(playFlag, FLAG_START_PLAYING_TUNE);
-
+      bitSet(playFlag, FLAG_START_PLAYING_TUNE);
       bitClear(playFlag, FLAG_NEXT_TUNE);
- 
     }
 
-
-
-    // Determine which button is pressed
+    // Work out which button is pressed.
     // note: We are going for tapping or gradual acceleration when holding forward/back buttons.
     if (buttonValue < maxButtonVoltage) {
       if (buttonValue > BUTTON_BACK_THRESHOLD) {
@@ -583,48 +335,27 @@ void loop() {
     }
 
     topAudioVoltage = max(max(topAudioVoltage, audioMeanA), max(audioMeanB, audioMeanC));
-    //    if (topAudioVoltage > 0) {
-    //     topAudioVoltage--;  // Decay the peak to create a sliding effect down to match updated audio levels.
-    //    if (topAudioVoltage < baseAudioVoltage) {
-    //     topAudioVoltage = baseAudioVoltage;
-    //  }
-    //}
+    if (topAudioVoltage > 0) {
+      // Prevent sudden peaks from dominating - This adjustment slightly widens the dynamic range, 
+      // so things are not overly restricted by a high peak that is rarely reached. 
+      topAudioVoltage--;  
+      if (topAudioVoltage < baseAudioVoltage) {
+        topAudioVoltage = baseAudioVoltage;
+      }
+    }
 
-      // Handle Forward and Backward Buttons
+    // Handle Forward and Backward Buttons
     handleButtonWithDelay(FLAG_BUTTON_FORWARD, 1);
     handleButtonWithDelay(FLAG_BUTTON_BACK, -1);
   }
 
-
-  /*
-  // Play/Pause Logic
-  if (bitRead(playFlag, FLAG_BUTTON_PAUSE) || bitRead(playFlag, FLAG_BUTTON_PLAY)) {
-    if (!bitRead(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED)) {
-      if (bitRead(playFlag, FLAG_BUTTON_PAUSE)) {
-        bitClear(playFlag, FLAG_PLAYING);
-        bitSet(playFlag, FLAG_PAUSE_TUNE);
-      } else if (bitRead(playFlag, FLAG_BUTTON_PLAY)) {
-        if (bitRead(playFlag, FLAG_PAUSE_TUNE)) {
-          bitSet(playFlag, FLAG_PLAYING);  // Resume playback
-          setChannelVolumes(lastVolumeChannelA, lastVolumeChannelB, lastVolumeChannelC);
-        } else {
-          bitSet(playFlag, FLAG_START_PLAYING_TUNE);  // Start new tune
-        }
-        bitClear(playFlag, FLAG_PAUSE_TUNE);  // Clear pause state
-      }
-      bitSet(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED);  // Mark action handled
-    }
-  } else {
-    bitClear(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED);  // Reset handled state
-  }
-*/
   // Update Display if Required
   if (bitRead(playFlag, FLAG_UPDATE_INFO)) {
     bitClear(playFlag, FLAG_UPDATE_INFO);
     oled.setCursor(0, DISPLAY_ROW_FILENAME);
     const char* fileName = getFileNameByIndex(root, currentIndex);
     const uint8_t len = strlen(fileName);
-    memset(fileName + len, ' ', 12 - len);  // clear last few charactes, alowing for shorter names
+    memset((void*)(fileName + len), ' ', 12 - len);  // clear last chars, for shorter names
     oled.print((char*)fileName);
 
     oled.setCursor(0, DISPLAY_ROW_FILE_COUNTER);
@@ -662,6 +393,7 @@ void loop() {
 
   // Playback and VU Meter Logic
   if (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {
+    bitClear(playFlag, FLAG_REFRESH_DISPLAY); 
     if (bitRead(playFlag, FLAG_PLAYING)) {
 
       uint8_t volumeChannelA = map(audioMeanA, baseAudioVoltage, topAudioVoltage, 0, 15);
@@ -679,7 +411,8 @@ void loop() {
       displayVuMeterBottomPart(volumeChannelC);
 
       oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
-      oled.print(fileRemainingBytesToRead / 1024);
+      //oled.print(fileRemainingBytesToRead / 1024);
+      oled.print(  analogRead(NextButton_pin)   );
       oled.print(F("K "));
 
       SendVUMeterDataToAY_IO(volumeChannelA, volumeChannelB, volumeChannelC);
@@ -875,15 +608,16 @@ ISR(TIMER2_COMPA_vect) {
   static int audioBsum = 0;  //   (reset to zero each display refresh)
   static int audioCsum = 0;  //
 
-
-    // Sample AY channels A,B and C
-    audioAsum += analogRead(AUDIO_FEEDBACK_A);
-    audioBsum += analogRead(AUDIO_FEEDBACK_B);
-    audioCsum += analogRead(AUDIO_FEEDBACK_C);
-  
+  // Sample AY channels A,B and C
+  audioAsum += analogRead(AUDIO_FEEDBACK_A);
+  audioBsum += analogRead(AUDIO_FEEDBACK_B);
+  audioCsum += analogRead(AUDIO_FEEDBACK_C);
 
   // Need 50 Hz playback, so we take the 250 best fit interrupts per second / 50 = 5 steps per 20ms
   if (++ISR_Scaler >= (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY)) {
+
+    // TO DO
+    // this calc and reset could be moved into the FLAG_REFRESH_DISPLAY logic part in the main loop
     audioMeanA = audioAsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
     audioMeanB = audioBsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
     audioMeanC = audioCsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
@@ -895,15 +629,14 @@ ISR(TIMER2_COMPA_vect) {
       interruptCountSkip--;
     } else {
       if (bitRead(playFlag, FLAG_PLAYING)) {
-        processPSG();
+        processPSG(); // from here gets called at the needed 50Hz rate
       }
     }
     ISR_Scaler = 0;
 
-    // 50Hz rate - also a good timing to refresh the display & UV meter
+    // 50Hz rate - also a good timing refresh rate to be reused for the display & UV meter
     bitSet(playFlag, FLAG_REFRESH_DISPLAY);
   }
-
 }
 
 // Arduino Nano Timer notes:
@@ -943,11 +676,8 @@ void processPSG() {
 
     switch (action) {
       // !!!!!!!!!! ?????? !!!!!!!!!!! this lines a issue for the tune : "Condomed Track 2.PSG"
-      case END_OF_MUSIC_0xFD: 
-   //     currentIndex = (currentIndex + 1 ) % totalFiles;  // index to next tune
-    //    bitSet(playFlag, FLAG_START_PLAYING_TUNE); 
-     //   bitSet(playFlag, FLAG_UPDATE_INFO); 
-  bitSet(playFlag,      FLAG_NEXT_TUNE); 
+      case END_OF_MUSIC_0xFD:
+        bitSet(playFlag, FLAG_NEXT_TUNE);
         return;
       case END_OF_INTERRUPT_0xFF: return;
     }
@@ -995,9 +725,6 @@ void resetAY() {
   audioMeanB = 0;
   audioMeanC = 0;
 
-  //lastAudio_A = 0;
-  //lastAudio_B = 0;
-  //lastAudio_C = 0;
   setAYMode(INACTIVE);
   // Reset line needs to go High->Low->High for AY38910/12
   digitalWrite(ResetAY_pin, HIGH);  // just incase start high
@@ -1029,6 +756,7 @@ inline bool readBuffer(byte& dat) {
   }
 }
 
+/*
 inline bool isFilePSG() {
   if (!file || file.isDirectory() || file.available() < 3) {
     return false;
@@ -1037,6 +765,12 @@ inline bool isFilePSG() {
   //char buffer[3];
   //file.readBytes(buffer, 3);
   //return memcmp(buffer, "PSG", 3) == 0;
+}
+*/
+
+// Helper function to check if a file has a .PSG extension
+bool isPsgFile(const char* fileName) {
+  return endsWithIgnoreCase(fileName, ".PSG");
 }
 
 // Reads a single byte from the SD card into the cache (circular buffer)
@@ -1064,6 +798,137 @@ void cacheSingleByteRead() {
   }
 }
 
+// Helper function to write a 32-bit integer to the output file
+void writeUint32(File& file, uint32_t value) {
+  file.write((uint8_t)(value & 0xFF));
+  file.write((uint8_t)((value >> 8) & 0xFF));
+  file.write((uint8_t)((value >> 16) & 0xFF));
+  file.write((uint8_t)((value >> 24) & 0xFF));
+}
+
+// Helper function to write a 16-bit integer to the output file
+void writeUint16(File& file, uint16_t value) {
+  file.write((uint8_t)(value & 0xFF));
+  file.write((uint8_t)((value >> 8) & 0xFF));
+}
+
+// Helper function 
+bool endsWithIgnoreCase(const char* str, const char* suffix) {
+  size_t strLen = strlen(str);
+  size_t suffixLen = strlen(suffix);
+  if (strLen < suffixLen) return false;
+
+  const char* strEnd = str + strLen - suffixLen;
+  return strcasecmp(strEnd, suffix) == 0;
+}
+
+// Helper function 
+const char* getFileNameByIndex(File& tempFile, size_t index) {
+  uint32_t offset;
+  uint16_t length;
+
+  // Calculate the position in the header for the given index
+  tempFile.seek(4 + index * 6);
+
+  // Read the offset directly as a 4-byte integer
+  offset = static_cast<uint32_t>(tempFile.read()) | (static_cast<uint32_t>(tempFile.read()) << 8) | (static_cast<uint32_t>(tempFile.read()) << 16) | (static_cast<uint32_t>(tempFile.read()) << 24);
+
+  // Read the length directly as a 2-byte integer
+  length = static_cast<uint16_t>(tempFile.read()) | (static_cast<uint16_t>(tempFile.read()) << 8);
+
+  // Seek to the file name position
+  tempFile.seek(offset);
+
+  // Read the file name
+  //char fileName[length + 1];
+  static char fileName[8 + 4 + 1];
+  fileName[length] = '.';
+  fileName[length + 1] = 'P';
+  fileName[length + 2] = 'S';
+  fileName[length + 3] = 'G';
+
+  tempFile.read((uint8_t*)fileName, length);
+  fileName[length + 4] = '\0';  // Null-terminate the string
+
+  //return String(fileName);
+  return fileName;
+}
+
+/*
+Here's how the header and filenames are structured:
+  Header:
+    4 bytes, Total file count
+    4 bytes, Offset of the filename
+    2 bytes, Length of the filename
+  Filenames:
+    N bytes, filenames sequentially, no nulls
+*/
+
+size_t CreatePsgFileList(File& outputFile) {
+  // --- First Pass: Count the total number of .PSG files ---
+  uint32_t totalFiles = 0;
+  File entry = root.openNextFile();
+  while (entry) {
+    if (!entry.isDirectory() && isPsgFile(entry.name())) {
+      totalFiles++;
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+
+  if (totalFiles == 0) {
+    return 0; // No .PSG files found
+  }
+
+  // Calculate header size: 4 bytes for total count, plus 6 bytes for each file (offset + length)
+  const size_t headerEntrySize = 4 + 2; // 4 bytes for offset, 2 bytes for length
+  const size_t headerSize = 4 + (totalFiles * headerEntrySize); // 4 bytes for total count
+
+  // --- Second Pass: Write Header Part ---
+  root.rewindDirectory(); // Restart the directory traversal
+  uint32_t currentOffset = headerSize; // Start writing strings after the header
+  outputFile.seek(0);
+
+  // Write total file count at the start of the header
+  writeUint32(outputFile, totalFiles);
+
+  entry = root.openNextFile();
+  while (entry) {
+    if (!entry.isDirectory() && isPsgFile(entry.name())) {
+      size_t fileNameLength = strlen(entry.name()) - 4; // Exclude ".PSG" from the length
+
+      // Write offset (4 bytes)
+      writeUint32(outputFile, currentOffset);
+
+      // Write length (2 bytes)
+      writeUint16(outputFile, fileNameLength);
+
+      // Update the current offset for the next file name
+      currentOffset += fileNameLength;
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+
+  // --- Third Pass: Write the file names ---
+  root.rewindDirectory();
+  entry = root.openNextFile();
+  while (entry) {
+    if (!entry.isDirectory() && isPsgFile(entry.name())) {
+      // Remove ".PSG" from the file name before writing
+      char fileName[13]; // Assuming 8.3 filename format
+      strncpy(fileName, entry.name(), strlen(entry.name()) - 4);
+      fileName[strlen(entry.name()) - 4] = '\0'; // Null-terminate the string
+
+      // Write the file name to the output file
+      outputFile.print(fileName);
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+
+  return totalFiles;
+}
 
 /* 
 =======================================================================
@@ -1132,223 +997,3 @@ described above.
 
 */
 
-
-
-
-
-/*
-  if (bitRead(playFlag, FLAG_BUTTON_PLAY)) {
-
-         bitClear(playFlag, FLAG_PLAYING);
-
-      fileIndex = fileSelect;
-  //    root = rootPlaying;
-     // file = filePlaying;
-      
-        if (file){ file.close();}
-     file = SD.open(filePlaying.name()); //"180.psg");
- // file = SD.open("180.psg");
-
-
-                   file.seek(16);  
-            fileRemainingBytesToRead -= 16; //advancePastHeader();
-    //        bitSet(playFlag, FLAG_START_PLAYING_TUNE);
-
-
-   oled.setCursor(0, DISPLAY_ROW_FILENAME);
-    // NOTE: Since the SD source code has:  char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
- //   const byte blankArea = strlen(file.name());
- //   memset(file.name() + blankArea, ' ', 12 - blankArea);  // clear last few charactes, alowing for shorter names
-    oled.print((char*)file.name());  
-
-      bitSet(playFlag, FLAG_START_PLAYING_TUNE);
-  }
-*/
-
-
-
-/*
-void selectTune(byte option) {
-
-
-  // Handle next or previous track selection
-  if (bitRead(option, FLAG_NEXT_TUNE)) {
-    bitClear(playFlag, FLAG_NEXT_TUNE);
-
-      do {
-        file.close();
-        file = root.openNextFile();
-        fileRemainingBytesToRead = file.size();
-        if (fileRemainingBytesToRead > 16) {  // check we have a body, 16 PSG header
-
-          char buffer[3];
-          file.readBytes(buffer, 3);
-          if (memcmp(buffer, "PSG", 3) == 0) {
-            fileRemainingBytesToRead -= advancePastHeader();
-
-            if (++fileIndex >= filesCount) {
-              root.rewindDirectory();
-              fileIndex = 0;
-            }
-
-            break;  // Found it - leave this file open, cache takes over from here on and process it.
-          }
-        }
-
-      } while (file || (fileIndex==0));
-
-
-    bitSet(playFlag, FLAG_START_PLAYING_TUNE);
-  } else if (bitRead(option, FLAG_BACK_TUNE)) {
-    bitClear(playFlag, FLAG_BACK_TUNE);
-    if (--fileIndex < 0) {
-      fileIndex = filesCount - 1;
-    }
-    bitSet(playFlag, FLAG_START_PLAYING_TUNE);
-  }
-}
-*/
-
-
-/*
-void SendVUMeterDataToAY_IO(byte audioA, byte audioB, byte audioC) {
-    writeAY(PSG_REG_ENABLE, B11000000 | LastAYEnableRegisiterUsed);
-
-    const byte threshold = 2;  // Equivalent to 15 / (8 - 1)
-    byte bits = 0;
-    byte avgAudio = (2 * audioA + audioB) / 3;
-    for (int i = 0; i < 8; i++) {
-      if (avgAudio > i * threshold) {
-        bits |= 1 << i;
-      }
-    }
-    writeAY(PSG_REG_IOA, bits);
-
-    bits = 0;
-    avgAudio = (2 * audioC + audioB) / 3;
-    for (int i = 0; i < 8; i++) {
-      if (avgAudio > i * threshold) {
-        bits |= 1 << i;
-      }
-    }
-    writeAY(PSG_REG_IOB, bits);
-}
-*/
-
-
-
-/*
-
-int16_t countPSGFiles() {
-
-   root.rewindDirectory();
-
-  int16_t total = 0;
-  while (true) {
-    file = root.openNextFile();
-    if (!file) {
-      break;
-    }
-    if (isFilePSG()) {
-      total++;
-    }
-    file.close();
-  }
-  root.rewindDirectory();
-  return total;
-}
-*/
-
-/*
-void selectFilexxx(int fileIndex) {  // optimise
-  if (file) {
-    file.close();
-  }
-  root.rewindDirectory();
-  int k = 0;
-  file = root.openNextFile();
-  while (file) {
-
-    if (k == fileIndex) {
-      fileRemainingBytesToRead = file.size();
-      if (fileRemainingBytesToRead > 16) {  // check we have a body, 16 PSG header
-
-        char buffer[3];
-        file.readBytes(buffer, 3);
-        if (memcmp(buffer, "PSG", 3) == 0) {
-          fileRemainingBytesToRead -= advancePastHeader();
-          break;  // Found it - leave this file open, cache takes over from here on and process it.
-        }
-      }
-    }
-    k++;
-
-    file.close();  // This isn't the file you're looking for, continue looking.
-    file = root.openNextFile();
-  }
-}
-*/
-
-/*
-// Here we are checking for the "PSG" file's header, byte by byte to help limit memory usage.
-// note: if found, global 'file' will have advanced 3 bytes
-inline bool isFilePSG() {
-  if (file && !file.isDirectory()) {
-
-    // Reading one byte at a time... Helps in saving some stack space.
-    return (file.available() && file.read() == 'P' && file.available() && file.read() == 'S' && file.available() && file.read() == 'G');
-  }
-  return false;
-}
-*/
-
-
-/*
-bool startTune() {
-
-    RESET_BUFFERS
-    
-  //  selectFile(fileIndex);
-
-    // oled.setCursor(0, DISPLAY_ROW_FILENAME);
-
-    // // NOTE: Since the SD source code has:  char _name[13]; then later on uses strncpy(_name, n, 12); _name[12] = 0;
-    // const byte blankArea = strlen(file.name());
-    // memset(file.name() + blankArea, ' ', 12 - blankArea);  // clear last few charactes, alowing for shorter names
-    // oled.print((char*)file.name());                        // becase of the above fudge, this will disaply all 12 characters - so will clear old shorter names
-
-    return true;
- // }
-  //return false;
-}
-*/
-
-
-/*
-inline int advancePastPSGHeaderxxx() {
-  // see: PSG FILE - HEADER & DATA DETAILS
-  file.seek(16);  // absolute position -  Skip header
-  return 16;
-}
-*/
-
-
-/*
-String getFileByIndex(File &tempFile, size_t index) {
-  uint8_t header[6];
-  uint32_t offset;
-  uint16_t length;
-
-  tempFile.seek(4 + index * 6);
-  tempFile.read(header, 6);
-  offset = static_cast<uint32_t>(header[0]) | (static_cast<uint32_t>(header[1]) << 8) | (static_cast<uint32_t>(header[2]) << 16) | (static_cast<uint32_t>(header[3]) << 24);
-  length = static_cast<uint16_t>(header[4]) | (static_cast<uint16_t>(header[5]) << 8);
-
-  tempFile.seek(offset);
-  char fileName[length + 1];
-  tempFile.read((uint8_t *)fileName, length);
-  fileName[length] = '\0';  // Null-terminate the string
-
-  return String(fileName);
-}
-*/
