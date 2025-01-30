@@ -3,7 +3,7 @@
 ### Music Player Release
 A PCB-based music player powered by the AY-3-8910 sound chip and an Arduino Nano. Developed with the Arduino IDE, prototyped on a breadboard, and finalized using EasyEDA. It plays PSG music from an SD card and includes a VU meter, OLED display, and button controls, blending retro sound with modern hardware.
 
-_This version features a streamlined hardware design and an improved user interface._
+_More features will be added to the software in the future. I have a spare button available for functions like settings - the overall hardware design should remain unchanged._
 
 #### Hardware Used
 - **Arduino Nano:** Microcontroller with 14 digital I/O pins, 8 analog inputs, and 16MHz clock. Drives the AY-3 sound chip via digital pins.
