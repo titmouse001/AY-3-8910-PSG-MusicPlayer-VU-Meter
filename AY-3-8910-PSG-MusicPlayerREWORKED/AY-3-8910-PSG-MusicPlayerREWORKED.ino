@@ -127,17 +127,19 @@ enum {
        FLAG_NEXT_TUNE,
        FLAG_BACK_TUNE,
        FLAG_PAUSE_TUNE,
-       FLAG_START_PLAYING_TUNE,
+       FLAG_INIT_SELECTED_TUNE,
        FLAG_REFRESH_DISPLAY,
        FLAG_PLAYING,
-       FLAG_BUTTON_BACK,
-       FLAG_BUTTON_FORWARD,
-       FLAG_BUTTON_PLAY,
-       FLAG_BUTTON_PAUSE,
+       //FLAG_BUTTON_BACK,
+       //FLAG_BUTTON_FORWARD,
+      // FLAG_BUTTON_PLAY,
+     //  FLAG_BUTTON_PAUSE,
        FLAG_UPDATE_INFO,
        FLAG_PLAY_OR_PAUSE_HANDLED,
 
        FLAG_NEXT_TUNE_HANDLED,
+       FLAG_PSG_FILE_ERROR,
+       FLAG_DISPLAY_TIMER_ERROR
        
 };
 
@@ -227,19 +229,14 @@ SD_CARD_MISSING_RETRY:
 
   // Sample AY audio lines (x3) for a baseline starting signal
   baseAudioVoltage = min(min(analogRead(AUDIO_FEEDBACK_A), analogRead(AUDIO_FEEDBACK_B)), analogRead(AUDIO_FEEDBACK_C));
-  //  tempFile = SD.open(tempFileName, FILE_READ);
-
   root.close();
   root = SD.open(tempFileName, FILE_READ);  // from now on reusing root for reading tempFile
-
-
   oled.clear();
 
   // -----------------------------------------------
   // Play First Tune Found/uses inital currentIndex
-  bitSet(playFlag, FLAG_START_PLAYING_TUNE);
+  bitSet(playFlag, FLAG_INIT_SELECTED_TUNE);
   bitSet(playFlag, FLAG_UPDATE_INFO);
-  //    bitSet(playFlag, FLAG_REFRESH_DISPLAY);
   //------------------------------------------------
 }
 
@@ -263,73 +260,140 @@ const int BUTTON_PLAY_PAUSE_MAX = 328+45; //380;
 // last button 20
 
 void loop() {
-
-  if (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) { // 50hz
+  if (bitRead(playFlag, FLAG_REFRESH_DISPLAY)) {  // 50hz
     bitClear(playFlag, FLAG_REFRESH_DISPLAY);
-
-    // Clear only the button-related flags - the button mask part will be updated using a freshly read 'buttonValue'.
-    playFlag &= ~((1 << FLAG_BUTTON_BACK) | (1 << FLAG_BUTTON_PAUSE) | (1 << FLAG_BUTTON_PLAY) | (1 << FLAG_BUTTON_FORWARD));
-
     // Values read are 0 to 1023 (0 to +5v) - note: H/W uses voltage ladder.
     int buttonValue = analogRead(NextButton_pin);  // we will read the buttons here, 50hz is plenty.
-
     // Work out which button is pressed.
     // note: We are going for tapping or gradual acceleration when holding forward/back buttons.
     if (buttonValue < NO_BUTTON_THRESHOLD) {
       if (buttonValue > BUTTON_BACK_THRESHOLD) {
-        bitSet(playFlag, FLAG_BUTTON_BACK);
+        handleButtonWithDelay(-1);
       } else if (buttonValue > BUTTON_FORWARD_MIN && buttonValue < BUTTON_FORWARD_MAX) {
-        bitSet(playFlag, FLAG_BUTTON_FORWARD);
-      } else if (buttonValue > BUTTON_PLAY_PAUSE_MIN && buttonValue < BUTTON_PLAY_PAUSE_MAX) {
-        if (bitRead(playFlag, FLAG_PLAYING) || bitRead(playFlag, FLAG_NEXT_TUNE_HANDLED)) {
-          // Play or Pause
-          if (bitRead(playFlag, FLAG_NEXT_TUNE_HANDLED)) {
-            bitSet(playFlag, FLAG_START_PLAYING_TUNE);  // Start new tune
-          } else if (!bitRead(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED)) {
-            bitClear(playFlag, FLAG_PLAYING);
-            bitSet(playFlag, FLAG_PAUSE_TUNE);  // Pause playback
-            setChannelVolumes(0, 0, 0);         // + muting sound as we are paused
-          }
-          bitSet(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED);
-        } else if (!bitRead(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED)) { 
-          bitClear(playFlag, FLAG_PAUSE_TUNE);
-          bitSet(playFlag, FLAG_PLAYING);       // Play or Resume depending on state
-          setChannelVolumes(lastPSGRegAmplitudeA, lastPSGRegAmplitudeB, lastPSGRegAmplitudeC); // unmute sound
-          bitSet(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED);
-        }
+        handleButtonWithDelay(1);
+      } else if (buttonValue > BUTTON_PLAY_PAUSE_MIN && buttonValue < BUTTON_PLAY_PAUSE_MAX) {      
+        playButtonlogic();
       } else {
         // TO DO - settings button here
       }
     } else {
-      bitClear(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED);
+      bitClear(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED); // reports buttons are unpressed
       holdDelay = 0;  // Button released so we can reset button delay
     }
-
-    if (bitRead(playFlag, FLAG_NEXT_TUNE)) { 
-      bitClear(playFlag, FLAG_NEXT_TUNE);
-      // Next tune after music ends (trigged on 'END_OF_MUSIC_0xFD' in processPSG)
-      currentIndex = (currentIndex + 1) % totalFiles;
-      bitSet(playFlag, FLAG_UPDATE_INFO);  // We made a change, lets display the new file information
-      bitSet(playFlag, FLAG_START_PLAYING_TUNE);   
-    }
-
-    handleButtonWithDelay(FLAG_BUTTON_FORWARD, 1);
-    handleButtonWithDelay(FLAG_BUTTON_BACK, -1);
-
-    updateDisplay();  
+ 
+    updateDisplay();
   }
-  
   handlePlayback();
+  // Monitor for tune end (trigged on 'END_OF_MUSIC_0xFD' in processPSG)
+  if (bitRead(playFlag, FLAG_NEXT_TUNE)) {
+    bitClear(playFlag, FLAG_NEXT_TUNE);
+    ChangeTune(1);
+    bitSet(playFlag, FLAG_UPDATE_INFO);  // We made a change, lets display the new file information
+    bitSet(playFlag, FLAG_INIT_SELECTED_TUNE);
+  }
+}
+
+void playButtonlogic() {
+
+  if (bitRead(playFlag, FLAG_PLAYING)) {
+    if (bitRead(playFlag, FLAG_NEXT_TUNE_HANDLED)) { 
+      // Start playing the selected tune
+      bitClear(playFlag, FLAG_NEXT_TUNE_HANDLED);
+      bitSet(playFlag, FLAG_INIT_SELECTED_TUNE);      // init new tune
+      bitSet(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED);   // Prevent rapid toggling between play and pause
+      return;
+    }
+    if (!bitRead(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED)) {
+      // Pause playback
+      bitClear(playFlag, FLAG_PLAYING); 
+      bitSet(playFlag, FLAG_PAUSE_TUNE);
+      bitSet(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED);   // Prevent rapid toggling between play and pause
+      setChannelVolumes(0, 0, 0);                     // Mute sound
+      return;
+    }
+  }
+
+  if (!bitRead(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED)) {
+    if (bitRead(playFlag, FLAG_PAUSE_TUNE)) {
+      // resume playing
+      bitClear(playFlag, FLAG_PAUSE_TUNE);
+      bitSet(playFlag, FLAG_PLAYING);                 
+      bitSet(playFlag, FLAG_PLAY_OR_PAUSE_HANDLED);  // Prevent rapid toggling between play and pause
+      setChannelVolumes(lastPSGRegAmplitudeA, lastPSGRegAmplitudeB, lastPSGRegAmplitudeC);  // Restore volume
+      return;
+    }
+  }
+
+  if (!bitRead(playFlag, FLAG_PLAYING) && !bitRead(playFlag, FLAG_PAUSE_TUNE)) {
+     // In a idle state, start playing the selected tune
+    bitSet(playFlag, FLAG_INIT_SELECTED_TUNE);
+    return;
+ }
 }
 
 
+// Utility: Handles forward/backward button logic
+void handleButtonWithDelay(int delta) {
+//  if (bitRead(playFlag, flag)) {
+ //   bitClear(playFlag, flag);
+    if (millis() - lastPressTime > holdDelay) {
+      ChangeTune(delta);
+      bitSet(playFlag, FLAG_UPDATE_INFO);
+      lastPressTime = millis();
+      if (holdDelay <= 0) { holdDelay = initHoldDelay; }
+      holdDelay = max((unsigned long)(holdDelay * delayReductionFactor), maxHoldDelay);
+      bitSet(playFlag, FLAG_NEXT_TUNE_HANDLED);
+    }
+//  }
+}
+
+void ChangeTune(int8_t direction) {
+  lastCurrentIndex = currentIndex;
+  currentIndex = (currentIndex + direction + totalFiles) % totalFiles;  
+}
+
+void handlePlayback() { // polled by main loop
+  if (bitRead(playFlag, FLAG_INIT_SELECTED_TUNE)) {
+    bitClear(playFlag, FLAG_INIT_SELECTED_TUNE);
+
+    if (initTune(currentIndex)) {  
+      // Selected tune initialised OK
+      bitSet(playFlag, FLAG_PLAYING);
+    }else { 
+      // load failed - not a real psg file
+      bitSet(playFlag, FLAG_PSG_FILE_ERROR); 
+    }
+  }
+  if (bitRead(playFlag, FLAG_PLAYING)) {
+    cacheSingleByteRead();
+  }
+}
+
 void updateDisplay() {
+
+  if (bitRead(playFlag, FLAG_PSG_FILE_ERROR)) {
+    static unsigned long errorDisplayTime = 0;
+    if (!bitRead(playFlag, FLAG_DISPLAY_TIMER_ERROR)) {
+      oled.clear();
+      oled.setCursor(0, 0);
+      oled.print(F("NOT A VALID PSG FILE"));
+      errorDisplayTime = millis();
+      bitSet(playFlag, FLAG_DISPLAY_TIMER_ERROR);
+    }
+    if (millis() - errorDisplayTime > 1000) {
+      oled.clear();
+      playFlag =0 ;
+      bitSet(playFlag, FLAG_UPDATE_INFO);
+      bitClear(playFlag, FLAG_DISPLAY_TIMER_ERROR);
+    }
+  }
 
   if (bitRead(playFlag, FLAG_PLAYING)) { 
     // playing
     updateVUMeter();
     updateBytesLeftDisplay();
-  } else {  
+  } 
+  if (bitRead(playFlag, FLAG_PAUSE_TUNE)) {
     // paused
     oled.setCursor(128 - 32, DISPLAY_ROW_BYTES_LEFT);
     oled.print(F(" || ")); // pause indicator
@@ -339,10 +403,10 @@ void updateDisplay() {
     bitClear(playFlag, FLAG_UPDATE_INFO);
     updateFileInfo( getFileNameByIndex(root, currentIndex) );
   }
-
 }
 
 void updateFileInfo( const char* fileName  ) {
+
   // Update filename part
   oled.setCursor(0, DISPLAY_ROW_FILENAME);
   const uint8_t len = strlen(fileName);
@@ -355,7 +419,6 @@ void updateFileInfo( const char* fileName  ) {
   oled.print(totalFiles);
   oled.print(F(" "));
 }
-
 
 void updateVUMeter() {
   topAudioVoltage = max(max(topAudioVoltage, audioMeanA), max(audioMeanB, audioMeanC));
@@ -392,72 +455,6 @@ void updateBytesLeftDisplay() {
   oled.print(fileRemainingBytesToRead / 1024);
   oled.print(F("K "));
 }
-
-void handlePlayback() {
-  if (bitRead(playFlag, FLAG_START_PLAYING_TUNE)) {
-    startPlayingTune();
-  }
-  if (bitRead(playFlag, FLAG_PLAYING)) {
-    cacheSingleByteRead();
-  }
-}
-
-/*
-inline bool isFilePSG() {
-  if (!file || file.isDirectory() || file.available() < 3) {
-    return false;
-  }
-  return (file.available() && file.read() == 'P' && file.available() && file.read() == 'S' && file.available() && file.read() == 'G');
-  //char buffer[3];
-  //file.readBytes(buffer, 3);
-  //return memcmp(buffer, "PSG", 3) == 0;
-}
-*/
-
-void startPlayingTune() {
-  lastCurrentIndex = currentIndex;
-  const char* fileName = getFileNameByIndex(root, currentIndex);
-  if (file) { file.close(); }
-  file = SD.open(fileName);
-  oled.setCursor(0, DISPLAY_ROW_FILENAME);
-  const uint8_t len = strlen(file.name());
-  memset(file.name() + len, ' ', 12 - len);  //filename is kept as static [8 + 4 + 1]
-  oled.print((char*)file.name());
-
-// TODO - CHECK FILE HAS A VAILD PSG HEADER
-
-// added FLAG_NOT_PSG_FILE_ERROR 
-
-
-  fileRemainingBytesToRead = file.size();
-  file.seek(16);  // Skip header
-  fileRemainingBytesToRead -= 16;
-
-  resetAY();
-  RESET_BUFFERS
-  bitClear(playFlag, FLAG_START_PLAYING_TUNE);
-  bitSet(playFlag, FLAG_PLAYING);
-  bitClear(playFlag, FLAG_NEXT_TUNE_HANDLED);
-}
-
-
-// Utility: Handles forward/backward button logic
-void handleButtonWithDelay(uint8_t flag, int delta) {
-  if (bitRead(playFlag, flag)) {
-    
-    bitClear(playFlag, flag);
-
-    if (millis() - lastPressTime > holdDelay) {
-      currentIndex = (currentIndex + delta + totalFiles) % totalFiles;  
-      bitSet(playFlag, FLAG_UPDATE_INFO);
-      lastPressTime = millis();
-      if (holdDelay <= 0) { holdDelay = initHoldDelay; }
-      holdDelay = max((unsigned long)(holdDelay * delayReductionFactor), maxHoldDelay);
-      bitSet(playFlag, FLAG_NEXT_TUNE_HANDLED);
-    }
-  }
-}
-
 
 void mixVolumes(uint8_t A, uint8_t B, uint8_t C, uint8_t* output1, uint8_t* output2) {
 
@@ -634,15 +631,16 @@ ISR(TIMER2_COMPA_vect) {
   static int audioCsum = 0;  //
 
   // Sample AY channels A,B and C
-  audioAsum += analogRead(AUDIO_FEEDBACK_A);
+  audioAsum += analogRead(AUDIO_FEEDBACK_A);  // TODO ... need a way to reset these to zero (not high priority thing, if even really needed)
   audioBsum += analogRead(AUDIO_FEEDBACK_B);
   audioCsum += analogRead(AUDIO_FEEDBACK_C);
 
-  // Need 50 Hz playback, so we take the 250 best fit interrupts per second / 50 = 5 steps per 20ms
+  // Need 50 Hz playback, so we wait 250 interrupts per second. Giving 250/50 = 5 steps per 20ms
   if (++ISR_Scaler >= (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY)) {
 
-    // TO DO
-    // this calc and reset could be moved into the FLAG_REFRESH_DISPLAY logic part in the main loop
+    // Why's ISR the code like this... Better to have the above onging sums as statics and NOT volatile.
+    // Then these next three volatiles can be shared ouside the ISR, rather than force the ISR to deal with volatiles constanlty.
+    // (if this part was moved out, then the ISR would suffer as the sums would need to be volatile)
     audioMeanA = audioAsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
     audioMeanB = audioBsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
     audioMeanC = audioCsum / (DUTY_CYCLE_FOR_TIMER2 / INTERRUPT_FREQUENCY);
@@ -785,8 +783,6 @@ inline bool readBuffer(byte& dat) {
     return false;
   }
 }
-
-
 
 // Helper function to check if a file has a .PSG extension
 bool isPsgFile(const char* fileName) {
@@ -941,6 +937,38 @@ size_t CreatePsgFileList(File& outputFile) {
   }
 
   return totalFiles;
+}
+
+
+uint8_t readValidPSGFileHeader() {
+  constexpr uint8_t PSG_HEADER_SIZE = 16;
+  if (file && !file.isDirectory() && file.available() >= PSG_HEADER_SIZE) {
+    if (file.read() == 'P' && file.read() == 'S' && file.read() == 'G' && file.read() == 0x1A) { 
+      file.seek(PSG_HEADER_SIZE - 4);
+      return PSG_HEADER_SIZE;
+    }
+  }
+  return 0; // Invalid PSG file
+}
+
+bool initTune(uint16_t currentIndex) {
+
+  resetAY();
+  RESET_BUFFERS
+
+  const char* fileName = getFileNameByIndex(root,currentIndex);
+  if (file) { file.close(); }
+  file = SD.open(fileName);
+
+  // Check if the file has a valid PSG header
+  uint8_t readBytes = readValidPSGFileHeader();
+  fileRemainingBytesToRead = file.size() - readBytes;
+  if (readBytes == 0) {
+  //  bitSet(playFlag, FLAG_NOT_PSG_FILE_ERROR);
+    file.close(); // Close invalid file
+    return false;
+  }
+  return true;
 }
 
 /* 
