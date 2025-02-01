@@ -16,7 +16,7 @@
 - Add user options/setttings
 - Random tune playback
 - Autoplay new tune
-- Option to prescan for invlid PSG files
+- Option to prescan for invalid PSG files
 
 #### Dependencies:
 ***Libraries:*** SPI.h, SD.h, SSD1306AsciiAvrI2c.h, and my custom headers for pins and AY-3-8910 registers.
