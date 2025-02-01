@@ -18,6 +18,7 @@ _More features will be added to the software in the future. I have a spare butto
 - Three independent audio channels
 - Square wave, white noise, and tone generation
 - Envelope generator for sound shaping
+- Popular in systems like the ZX Spectrum, Amstrad CPC, MSX, and Atari ST.
 
 #### PCB Layouts
 <div style="float:left;margin:0 10px 10px 0" markdown="1">
