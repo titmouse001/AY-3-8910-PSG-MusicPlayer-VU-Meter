@@ -6,6 +6,8 @@ Developed with the Arduino IDE, prototyped on a breadboard, and finalized using 
 
 _More features will be added to the software in the future. I have a spare button available for functions like settings - the overall hardware design should remain unchanged._
 
+[![Ghost Trap](https://img.youtube.com/vi/CoyDbazvxLU/0.jpg)](https://www.youtube.com/watch?v=CoyDbazvxLU)
+
 #### Hardware Used
 - **Arduino Nano:** Microcontroller with 14 digital I/O pins, 8 analog inputs, and 16MHz clock. Drives the AY-3 sound chip via digital pins.
 - **AY-3-8910 PSG:** Generates sound with three audio channels, supporting square wave, white noise, and tone generation.
