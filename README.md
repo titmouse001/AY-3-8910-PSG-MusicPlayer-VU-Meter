@@ -1,7 +1,8 @@
-## AY-3-8910 PSG Music Player with VU Meter
+## AYBeat (AY-3-8910 PSG Music Player with VU Meter)
 
 ### Music Player Release
-A PCB-based music player powered by the AY-3-8910 sound chip and an Arduino Nano. Developed with the Arduino IDE, prototyped on a breadboard, and finalized using EasyEDA. It plays PSG music from an SD card and includes a VU meter, OLED display, and button controls, blending retro sound with modern hardware.
+AYBeat is an Arduino-driven AY-3-8910 PSG music player that reads music files from an SD card and outputs audio via a phono jack. It has a stereo VU meter using LEDs, an OLED display for selecting tunes, and a 3-channel UV bar.
+Developed with the Arduino IDE, prototyped on a breadboard, and finalized using EasyEDA. It plays PSG music from an SD card and includes a VU meter, OLED display, and button controls, blending retro sound with modern hardware.
 
 _More features will be added to the software in the future. I have a spare button available for functions like settings - the overall hardware design should remain unchanged._
 
